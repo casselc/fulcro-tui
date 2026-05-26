@@ -107,31 +107,39 @@
               (tui/line {})
               (tui/hbox {:height 1}
                         (tui/button {:id          :save
+                                     :color       (if saved? :bright-green :green)
+                                     :bold        true
                                      :highlight   (tui/focused? :save)
                                      :on-activate (fn [] (tui/transact! this [(set-field {:k :form/saved? :v true})]))}
                                     (if saved? " Saved! " " Save "))
                         (tui/text {:width 2} "")
                 ;; Opens a plain modal confirmation dialog (see the :confirm modal below).
                         (tui/button {:id          :reset
+                                     :color       :bright-yellow
+                                     :bold        true
                                      :highlight   (tui/focused? :reset)
                                      :on-activate (fn [] (tui/transact! this [(set-field {:k :form/confirm-open? :v true})]))}
                                     " Reset… "))
-              (tui/text {} (str "name=" (pr-str name) "  email=" (pr-str email) "  saved?=" (boolean saved?)))
+              (tui/text {:color (if saved? :bright-green :bright-black)}
+                        (str "name=" (pr-str name) "  email=" (pr-str email) "  saved?=" (boolean saved?)))
               (tui/line {})
-              (tui/text {} (str "Items (Tab in, then arrows/PageUp/PageDown to scroll) — "
-                                "selected: " (if selected (str "Item " selected) "none")))
+              (tui/text {:color :yellow} (str "Items (Tab in, then arrows/PageUp/PageDown to scroll) — "
+                                              "selected: " (if selected (str "Item " selected) "none")))
       ;; A fixed-height viewport of 15 focusable items; tabbing into it auto-scrolls.
-              (tui/viewport {:id :items :height 6 :border? true}
+              (tui/viewport {:id :items :height 6 :border? true :color :bright-black}
                             (tui/vbox {}
                                       (for [i (range item-count)]
                                         (tui/button {:id          (keyword (str "item-" i))
+                                                     :color       (if (= selected i) :bright-green :cyan)
                                                      :highlight   (tui/focused? (keyword (str "item-" i)))
                                                      :on-activate (fn [] (tui/transact! this [(set-field {:k :form/selected :v i})]))}
-                                                    (str "Item " i)))))
+                                                    (str (if (= selected i) "● " "  ") "Item " i)))))
               (tui/line {})
       ;; A button that opens a modal list picker. The picker overlays the whole UI, traps focus
       ;; (Up/Down to highlight, Enter to choose, Escape to cancel), and scrolls if the list is long.
               (tui/button {:id          :pick-fruit
+                           :color       :bright-magenta
+                           :bold        true
                            :highlight   (tui/focused? :pick-fruit)
                            :on-activate (fn [] (tui/transact! this [(set-field {:k :form/picker-open? :v true})]))}
                           (str " Pick a fruit (" (if fruit (str/capitalize (clojure.core/name fruit)) "none") ") "))
@@ -155,17 +163,23 @@
                             :title      "Confirm reset"
                             :width      40
                             :height     7
+                            :color      :red
                             :on-dismiss close!}
-                           (tui/text {:wrap true} "Reset every field to its initial value? This cannot be undone.")
+                           (tui/text {:wrap true :color :bright-red}
+                                     "Reset every field to its initial value? This cannot be undone.")
                            (tui/line {})
                            (tui/hbox {:height 1 :align :center}
                                      (tui/button {:id          :confirm-reset
+                                                  :color       :bright-red
+                                                  :bold        true
                                                   :highlight   (tui/focused? :confirm-reset)
                                                   :on-activate (fn [] (tui/transact! this [(reset-form {})])
                                                                  (close!))}
                                                  " Reset ")
                                      (tui/text {:width 2} "")
                                      (tui/button {:id          :confirm-cancel
+                                                  :color       :bright-green
+                                                  :bold        true
                                                   :highlight   (tui/focused? :confirm-cancel)
                                                   :on-activate close!}
                                                  " Cancel ")))))))
