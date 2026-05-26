@@ -1,5 +1,6 @@
 = fulcro-tui
 
+image:https://img.shields.io/clojars/v/com.fulcrologic/fulcro-tui.svg[link=https://clojars.org/com.fulcrologic/fulcro-tui]
 image:https://github.com/fulcrologic/fulcro-tui/actions/workflows/test.yml/badge.svg["CI", link="https://github.com/fulcrologic/fulcro-tui/actions/workflows/test.yml"]
 
 A terminal (TUI) rendering target for https://github.com/fulcrologic/fulcro[Fulcro], backed by https://github.com/jline/jline3[JLine].
@@ -11,6 +12,13 @@ Fulcro normally renders through React to the browser DOM. This library provides 
 Works on the JVM *and* under https://babashka.org[babashka]. The historical bb blockers (Fulcro's `Mutation` `deftype` not being constructable by bb's SCI, and transitively-pulled `spec.alpha`/`clojurescript` jars shadowing bb's built-ins) are resolved in the Fulcro build this depends on; JLine's inner-class resize-signal API is routed through `sun.misc.Signal` so it works on both runtimes. Run the demo under babashka with `bb run tui` — see `bb.edn` for details.
 
 == Adding as a dependency
+
+Released to https://clojars.org/com.fulcrologic/fulcro-tui[Clojars] — use the version shown in the badge above (`deps.edn`):
+
+[source,clojure]
+----
+{:deps {com.fulcrologic/fulcro-tui {:mvn/version "1.0.0-alpha1-SNAPSHOT"}}}
+----
 
 Local checkout (`deps.edn`):
 

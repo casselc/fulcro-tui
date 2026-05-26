@@ -4,7 +4,8 @@
 tests:
 	clojure -M:test:kaocha
 
-# Build the jar and deploy it to Clojars. Runs the tests first.
-# Credentials come from CLOJARS_USERNAME/CLOJARS_PASSWORD or ~/.m2/settings.xml.
+# Build, GPG-sign, and deploy to Clojars via Maven (pom.xml).
+# Credentials come from the <server id="clojars"> entry in ~/.m2/settings.xml.
 deploy:
-	clojure -T:build deploy
+	rm -rf target
+	mvn deploy
