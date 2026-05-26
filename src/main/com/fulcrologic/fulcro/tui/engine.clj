@@ -1,26 +1,27 @@
-(ns com.fulcrologic.fulcro.tui
-  "A terminal (TUI) rendering target for Fulcro.
+(ns com.fulcrologic.fulcro.tui.engine
+  "The pure TUI engine: the layout, paint, diff, focus, input, and overlay-compositing pipeline that
+   turns a tree of terminal-native *nodes* into a character cell buffer (and ANSI), plus the
+   component-render walker. This namespace also owns the node-structure vocabulary (the `::tag`/
+   `::attrs`/`::children` keys and related specs) and the focus/scroll/caret state keys.
 
-   Fulcro normally renders through React to the browser DOM. This namespace provides an alternative
-   rendering target that lays out a tree of terminal-native nodes (boxes, text, inputs, buttons) and
-   paints them into a character cell buffer for display via a JLine terminal (see
-   `com.fulcrologic.fulcro.tui.terminal`).
+   Build the node tree with the element generators in `com.fulcrologic.fulcro.tui.elements`; drive it
+   to a terminal with `com.fulcrologic.fulcro.tui.application`; paint to a concrete terminal via
+   `com.fulcrologic.fulcro.tui.terminal`.
 
-   The UI is described as a tree of *nodes*. A node is a plain map of the form:
+   A node is a plain map of the form:
 
    ```
-   {:com.fulcrologic.fulcro.tui/tag      :vbox        ; one of `tags`
-    :com.fulcrologic.fulcro.tui/attrs    {...}        ; layout/style/event attributes
-    :com.fulcrologic.fulcro.tui/children [...]}       ; child nodes, strings, and numbers
+   {:com.fulcrologic.fulcro.tui.engine/tag      :vbox        ; one of `tags`
+    :com.fulcrologic.fulcro.tui.engine/attrs    {...}        ; layout/style/event attributes
+    :com.fulcrologic.fulcro.tui.engine/children [...]}       ; child nodes, strings, and numbers
    ```
 
-   Use the element generators (`vbox`, `hbox`, `box`, `text`, `input`, `button`, `line`, `viewport`)
-   to build the tree rather than constructing the maps by hand."
+   This is JVM/babashka only (plain `.clj`)."
   (:require
    [clojure.spec.alpha :as s]
    [clojure.string :as str]
    [com.fulcrologic.fulcro.algorithms.denormalize :as fdn]
-   [com.fulcrologic.fulcro.algorithms.macro-support :as ms]
+   [com.fulcrologic.fulcro.components :as comp]
    [com.fulcrologic.fulcro.raw.application :as rapp]
    [com.fulcrologic.fulcro.raw.components :as rc]
    [com.fulcrologic.guardrails.core :refer [>def >defn >defn- => ?]]))
@@ -47,7 +48,7 @@
 (>def ::tag tags)
 (>def ::attrs map?)
 ;; A child may also be an (as-yet unrendered) component instance produced by a
-;; `factory`; the walker (`render-tree`) replaces such instances with their rendered
+;; `comp/factory`; the walker (`render-tree`) replaces such instances with their rendered
 ;; node trees. We permit it here so element generators can splice component instances
 ;; into their children during a component's render.
 (>def ::child (s/or :node ::node :text string? :number number?
@@ -60,103 +61,6 @@
        [x]
        [any? => boolean?]
        (boolean (and (map? x) (contains? tags (::tag x)))))
-
-(>defn- flatten-children
-        "Returns a vector of `children` with nested sequential collections flattened and `nil`s removed.
-   Nodes, strings, and numbers are retained as-is, in order. This lets callers splice seqs of
-   children (e.g. from `map`) directly into an element's argument list."
-        [children]
-        [sequential? => ::children]
-        (persistent!
-         (reduce
-          (fn [acc c]
-            (cond
-              (nil? c)                              acc
-              (and (sequential? c) (not (node? c))) (reduce conj! acc (flatten-children c))
-              :else                                 (conj! acc c)))
-          (transient [])
-          children)))
-
-(>defn element
-       "Returns a TUI node with the given `tag` built from `args`. If the first of `args` is a map it is
-   used as the node's attributes (otherwise attributes default to `{}`); the remaining `args` become
-   the node's children (flattened, with `nil`s removed). Prefer the named generators (`vbox`, etc.)
-   over calling this directly."
-       [tag args]
-       [::tag (? sequential?) => ::node]
-       (let [args             (or args [])
-             [attrs children] (if (map? (first args))
-                                [(first args) (rest args)]
-                                [{} args])]
-         {::tag tag ::attrs attrs ::children (flatten-children children)}))
-
-(defn vbox
-  "Returns a `:vbox` node that stacks `children` vertically. An optional leading attribute map sets
-   layout/style attributes for the container."
-  [& args]
-  (element :vbox args))
-
-(defn hbox
-  "Returns an `:hbox` node that stacks `children` horizontally. An optional leading attribute map
-   sets layout/style attributes for the container."
-  [& args]
-  (element :hbox args))
-
-(defn box
-  "Returns a `:box` node: a single styling/padding/border container around `children`. An optional
-   leading attribute map sets layout/style attributes."
-  [& args]
-  (element :box args))
-
-(defn text
-  "Returns a `:text` node rendering its string/number `children` as text. An optional leading
-   attribute map sets style attributes (e.g. `:color`, `:highlight`)."
-  [& args]
-  (element :text args))
-
-(defn input
-  "Returns an `:input` leaf node from the given `attrs` map. Inputs are controlled: `:value` (and
-   optionally `:caret`) come from props, and `:on-change` receives proposed edits."
-  [attrs]
-  (element :input [attrs]))
-
-(defn button
-  "Returns a `:button` node rendering `children` as its label. An optional leading attribute map sets
-   `:id`, `:on-activate`, and style attributes."
-  [& args]
-  (element :button args))
-
-(defn line
-  "Returns a `:line` leaf node (a rule). An optional leading attribute map sets orientation/style."
-  [& args]
-  (element :line args))
-
-(defn viewport
-  "Returns a `:viewport` node: a fixed-size container whose (potentially larger) `children` scroll
-   within its bounds. An optional leading attribute map sets size and `:id` (for scroll state)."
-  [& args]
-  (element :viewport args))
-
-(defn modal
-  "Returns a `:modal` overlay node stacking `children` vertically inside a window that the driver
-   floats over the rest of the UI (compositing it on top and trapping focus/keyboard input to it).
-   An optional leading attribute map sets:
-
-     * `:id`        - (recommended) identity for focus/queries.
-     * `:open?`     - the overlay is active (composited + focus-trapped) only when truthy. When falsy
-                      the modal renders nothing.
-     * `:width`/`:height` - the window size in cells (a number, or a `[:fraction f]` of the screen);
-                      defaults to the modal's intrinsic content size when omitted.
-     * `:align`     - position on screen, one of `:center` (default), `:start`, `:end`.
-     * `:border?`   - draw a border (default `true`).
-     * `:title`     - a string painted onto the top border.
-     * `:on-dismiss`- a zero-arg handler invoked when Escape is pressed while the modal is active.
-
-   Lifecycle (toggling `:open?`, recording any selection) is the application's responsibility via its
-   own state/mutations — this node owns no state."
-  [& args]
-  (let [[attrs children] (if (map? (first args)) [(first args) (rest args)] [{} args])]
-    (element :modal (into [(merge {:border? true} attrs)] children))))
 
 ;; ============================================================================
 ;; Character width (wcwidth-lite)
@@ -375,7 +279,9 @@
    bare strings/numbers, which become text lines."
         [c]
         [any? => ::node]
-        (if (node? c) c (text {} (str c))))
+        ;; Build the text node inline (don't call the `elements` constructor) so the engine has no
+        ;; dependency on `tui.elements` — the dependency runs one way: elements -> engine.
+        (if (node? c) c {::tag :text ::attrs {} ::children [(str c)]}))
 
 (>defn- resolve-size
         "Resolves a child size `spec` against the available main-axis `extent` and the child's `intrinsic`
@@ -1037,49 +943,16 @@
 ;; These instances are understood by `rc/props`, `rc/get-computed`, `rc/get-ident`,
 ;; and `rc/component-options`, so user render functions can use the normal raw API.
 
-(def ^:dynamic *app*
-  "The Fulcro app the walker is rendering for. Bound by `render-tree` so that
-   `factory` can stamp the app onto the instances it creates. Defaults to `nil`."
-  nil)
-
-(def ^:dynamic *parent*
-  "The component instance currently being rendered (the parent of the children a
-   `factory` is about to create). Bound by the walker as it descends. Defaults to `nil`."
-  nil)
+;; Component *instances* are built with Fulcro's own `comp/factory`/`comp/computed-factory`.
+;; In CLJ (and babashka) those produce a plain raw-component instance map (see
+;; `com.fulcrologic.fulcro.components/create-element`), recognized by `rc/component-instance?`
+;; and readable via `rc/props`/`rc/get-computed`/`rc/component-options` — exactly what the walker
+;; (`render-tree`) needs. We therefore do NOT define our own factory; we just bind Fulcro's
+;; render-time dynamic vars (`comp/*app*`/`comp/*parent*`/`comp/*shared*`) around the walk, the same
+;; way `com.fulcrologic.fulcro.application/mount!` does, so the app/shared are stamped onto instances.
 
 (>def ::component-class rc/component-class?)
 (>def ::component-instance rc/component-instance?)
-
-(>defn factory
-       "Returns an element-factory `(fn [props & children] instance-map)` for the TUI
-   component `class`. Calling the returned factory builds a React-free component
-   *instance* map carrying the given `props` (under `:fulcro$value`), the dynamically
-   bound `*app*`, and (when `props` carries a `:react-key`) a `:fulcro$reactKey`. The
-   resulting instance works with `rc/props`, `rc/get-computed`, `rc/get-ident`, and
-   `rc/component-options`, and is recognized by `rc/component-instance?`. The walker
-   (`render-tree`) consumes such instances."
-       [class]
-       [::component-class => ifn?]
-       (fn element-factory [props & children]
-         (let [key (:react-key props)]
-           {:fulcro$isComponent true
-            :fulcro$class       class
-            :children           (vec children)
-            :props              (merge {:fulcro$value props
-                                        :fulcro$app   *app*}
-                                       (when (some? key) {:fulcro$reactKey key}))})))
-
-(>defn computed-factory
-       "Returns a factory like `factory`, but whose returned function accepts an optional
-   trailing computed map: `(f props)` or `(f props computed-map)`. The `computed-map`
-   is attached to `props` via `rc/computed` so that `rc/get-computed` can retrieve it
-   inside the component's render."
-       [class]
-       [::component-class => ifn?]
-       (let [real-factory (factory class)]
-         (fn computed-element-factory
-           ([props] (real-factory props))
-           ([props computed-map] (real-factory (rc/computed props computed-map))))))
 
 (>defn render-instance
        "Returns the node (or vector of nodes/strings/numbers) produced by calling the
@@ -1115,7 +988,7 @@
 
    * a TUI node (`node?`) - recurse into its `::children` (rendering each child),
      keeping the node's tag/attrs;
-   * a component instance (`rc/component-instance?`) - bind `*parent*` to it, call its
+   * a component instance (`rc/component-instance?`) - bind `comp/*parent*` to it, call its
      `:render`, then recurse into the returned node (or splice a returned vector of
      siblings);
    * a string or number - returned unchanged;
@@ -1134,7 +1007,7 @@
          (assoc x ::children (render-children (::children x)))
 
          (rc/component-instance? x)
-         (binding [*parent* x]
+         (binding [comp/*parent* x]
            (let [output (render-instance x)]
              (cond
                (nil? output)    nil
@@ -1149,95 +1022,17 @@
 
 (>defn render-root
        "Returns the pure TUI node tree for a root component `class` given its `props` tree.
-   Builds a root instance via `(factory class)` (binding `*app*` to `app`, default
-   `nil`) and walks it with `render-tree`."
+   Builds a root instance via `(comp/factory class)` and walks it with `render-tree`. Binds
+   Fulcro's render-time dynamic vars (`comp/*app*`/`comp/*parent*`/`comp/*shared*`) around the
+   walk — the same vars `com.fulcrologic.fulcro.application/mount!` binds during a React render —
+   so the app and shared props are stamped onto the instances the factories create."
        ([class props] [::component-class map? => any?] (render-root class props nil))
        ([class props app]
         [::component-class map? any? => any?]
-        (binding [*app*    app
-                  *parent* nil]
-          (render-tree ((factory class) props)))))
-
-;; ----------------------------------------------------------------------------
-;; defsc macro
-;; ----------------------------------------------------------------------------
-
-(defn tui-defsc*
-  "Returns the macroexpansion of a `tui/defsc` form from the macro `env` and `args`
-   (the raw `defsc` argument list). Validates the args/options via macro-support's
-   `::ms/args`/`::ms/options` specs and builds `:ident`/`:query`/`:initial-state`
-   forms via the `ms/build-*` helpers (so prop-destructuring-vs-query and
-   ident-in-query are validated for free). Emits a plain `def` of the class built by
-   `rc/configure-anonymous-component!` from an options map containing the codegen'd
-   `:query`/`:ident`/`:initial-state`, the `:componentName`, and a React-free
-   `:render` `(fn [this] (let [props (rc/props this) ...] body))`. No React is
-   emitted, and no `cljs.analyzer` is touched (errors come from macro-support's
-   default `ex-info`)."
-  [env args]
-  (when-not (s/valid? ::ms/args args)
-    (throw (ms/macro-error env (str "Invalid arguments. " (-> (s/explain-data ::ms/args args)
-                                                              ::s/problems first :path) " is invalid."))))
-  (let [{:keys [sym doc arglist options body]} (s/conform ::ms/args args)
-        [thissym propsym computedsym extra-args] arglist
-        _ (when (and options (not (s/valid? ::ms/options options)))
-            (let [path    (-> (s/explain-data ::ms/options options) ::s/problems first :path)
-                  message (cond
-                            (= path [:query :template]) "The query template only supports vectors as queries. Unions or expression require the lambda form."
-                            (= :ident (first path)) "The ident must be a keyword, 2-vector, or lambda of no arguments."
-                            :else "Invalid component options. Please check to make\nsure your query, ident, and initial state are correct.")]
-              (throw (ms/macro-error env message))))
-        {:keys [ident query initial-state]} (s/conform ::ms/options options)
-        body                             (or body ['nil])
-        ident-template-or-method         (into {} [ident])
-        initial-state-template-or-method (into {} [initial-state])
-        query-template-or-method         (into {} [query])
-        validate-query?                  (and (:template query-template-or-method) (not (some #{'*} (:template query-template-or-method))))
-        legal-key-checker                (if validate-query?
-                                           (or (ms/-legal-keys (:template query-template-or-method)) #{})
-                                           (complement #{}))
-        ident-form                       (ms/build-ident env thissym propsym ident-template-or-method legal-key-checker)
-        state-form                       (ms/build-initial-state env sym initial-state-template-or-method legal-key-checker query-template-or-method)
-        query-form                       (ms/build-query-forms env sym thissym propsym query-template-or-method)
-        _                                (when validate-query?
-                                           (ms/check-query-looks-valid env sym (:template query-template-or-method)))
-        nspc                             (name (ns-name *ns*))
-        fqkw                             (keyword (str nspc) (name sym))
-        render-form                      `(fn [~thissym]
-                                            (let [~propsym (com.fulcrologic.fulcro.raw.components/props ~thissym)
-                                                  ~@(when computedsym
-                                                      [computedsym `(com.fulcrologic.fulcro.raw.components/get-computed ~thissym)])
-                                                  ~@(when extra-args
-                                                      [extra-args `(com.fulcrologic.fulcro.raw.components/children ~thissym)])]
-                                              ~@body))
-        options-map                      (cond-> options
-                                           state-form  (assoc :initial-state state-form)
-                                           ident-form  (assoc :ident ident-form)
-                                           query-form  (assoc :query query-form)
-                                           true        (assoc :componentName fqkw)
-                                           true        (assoc :render render-form))]
-    `(def ~(vary-meta sym assoc :doc doc :once true)
-       (com.fulcrologic.fulcro.raw.components/configure-anonymous-component!
-        (fn [~'_] nil)
-        ~options-map))))
-
-(defmacro defsc
-  "Define a React-free TUI stateful component. Mirrors `com.fulcrologic.fulcro.components/defsc`'s
-   argument list and option handling (query/ident/initial-state validation and codegen via
-   `macro-support`) but emits NO React: it `def`s a faux Fulcro class whose `:render` is a plain
-   `(fn [this] ...)` that destructures `props`/`computed`/`extra` from the instance via the raw
-   component API.
-
-   ```
-   (tui/defsc Item [this {:keys [item/id item/label]} {:keys [on-select]}]
-     {:query [:item/id :item/label]
-      :ident :item/id}
-     (tui/button {:id (str id) :on-activate on-select} label))
-   ```
-
-   The class is usable with `rc/component-options`, `rc/get-query`, `rc/get-ident`, and the
-   `factory`/`render-tree` walker in this namespace."
-  [& args]
-  (tui-defsc* &env args))
+        (binding [comp/*app*    app
+                  comp/*parent* nil
+                  comp/*shared* (some-> app comp/shared)]
+          (render-tree ((comp/factory class) props)))))
 
 ;; ----------------------------------------------------------------------------
 ;; Node-query / interaction utilities
@@ -1429,24 +1224,6 @@
   "The `:id` of the currently focused node, bound by the walker/driver during a
    render so that render code can call `focused?`. Defaults to `nil`."
   nil)
-
-(>defn transact!
-       "Re-export of `com.fulcrologic.fulcro.raw.components/transact!` for use by TUI
-   event handlers. Submits transaction `tx` against `app-or-component` (optionally
-   with `options`), returning the transaction id."
-       ([app-or-component tx]
-        [any? vector? => any?]
-        (rc/transact! app-or-component tx))
-       ([app-or-component tx options]
-        [any? vector? map? => any?]
-        (rc/transact! app-or-component tx options)))
-
-(>defn focused?
-       "Returns true if `id` is the id of the node that currently has focus (per the
-   dynamically bound `*current-focus*`)."
-       [id]
-       [any? => boolean?]
-       (= id *current-focus*))
 
 (>defn current-focus
        "Returns the currently focused node `:id` from `app-or-state`. Accepts either a
@@ -2049,36 +1826,6 @@
              x    (+ (:x screen-rect) (align-offset align (:w screen-rect) w))
              y    (+ (:y screen-rect) (align-offset align (:h screen-rect) h))]
          {:x x :y y :w w :h h}))
-
-(>defn picker
-       "Returns a `:modal` overlay presenting `options` as a scrollable list of selectable rows — a list
-   picker. Each row is a focusable button, so the focused row IS the highlighted choice: the focus
-   ring moves the highlight (Up/Down/Tab), the enclosing `:viewport` auto-scrolls to keep it visible
-   (PageUp/PageDown page it), Enter selects, and Escape cancels. State and selection handling are the
-   application's responsibility — this is a pure composition of existing nodes. `opts`:
-
-     * `:id`        - (required) base keyword for the modal and per-row focus ids.
-     * `:open?`     - the picker is shown only when truthy.
-     * `:title`     - optional title painted on the modal border.
-     * `:width`/`:height` - window size in cells (default 40 x 12).
-     * `:options`   - a vector of `{:value :label}` maps (`:value` a keyword/string/symbol, `:label`
-                      the displayed text).
-     * `:on-select` - one-arg handler called with a row's `:value` when its row is activated (Enter).
-     * `:on-cancel` - zero-arg handler called on Escape (wired to the modal's `:on-dismiss`)."
-       [{:keys [id open? title width height options on-select on-cancel]}]
-       [map? => ::node]
-       (modal {:id id :open? open? :title title
-               :width (or width 40) :height (or height 12)
-               :on-dismiss on-cancel}
-              (viewport {:id (keyword (str (name id) "-list")) :grow 1}
-                        (vbox {}
-                              (mapv (fn [{:keys [value label]}]
-                                      (let [row-id (keyword (str (name id) "-" (name value)))]
-                                        (button {:id          row-id
-                                                 :highlight   (focused? row-id)
-                                                 :on-activate (fn [] (when on-select (on-select value)))}
-                                                (str label))))
-                                    options)))))
 
 ;; ----------------------------------------------------------------------------
 ;; process-key! — single-step driver

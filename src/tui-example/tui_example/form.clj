@@ -11,9 +11,9 @@
    button or list item, PageUp / PageDown scroll the item list, and Ctrl-Q quits. Tabbing into the
    list auto-scrolls the viewport to keep the focused item visible.
 
-   The \"Reset…\" button opens a plain `tui/modal` confirmation dialog with two focus-trapped buttons:
+   The \"Reset…\" button opens a plain `elements/modal` confirmation dialog with two focus-trapped buttons:
    Tab / Shift-Tab cycle between Reset and Cancel, Enter activates the focused one, and Escape (or
-   Cancel) dismisses it. The \"Pick a fruit\" button opens a `tui/picker` — a modal list picker — that
+   Cancel) dismisses it. The \"Pick a fruit\" button opens a `elements/picker` — a modal list picker — that
    likewise overlays the UI and traps focus, so Up / Down move the highlight (the list scrolls to
    follow), Enter chooses the fruit, and Escape cancels. Both modals' open/closed state and any chosen
    value are ordinary app state.
@@ -23,9 +23,11 @@
    caret visible. A read-only wrapped paragraph above the form demonstrates line wrapping."
   (:require
    [clojure.string :as str]
+   [com.fulcrologic.fulcro.components :as comp]
    [com.fulcrologic.fulcro.mutations :as m]
-   [com.fulcrologic.fulcro.tui :as tui]
-   [com.fulcrologic.fulcro.tui.driver :as drv]))
+   [com.fulcrologic.fulcro.tui.engine :as engine]
+   [com.fulcrologic.fulcro.tui.elements :as elements]
+   [com.fulcrologic.fulcro.tui.application :as app]))
 
 (m/defmutation set-field
   "Stores value `v` under top-level key `k` in app state (the form fields live at the root)."
@@ -60,134 +62,138 @@
   "A read-only sentence used to demonstrate word wrapping in a fixed-width box."
   "This read-only paragraph wraps to its fixed-width box, showing the word-wrapping support.")
 
-(tui/defsc Root [this {:keys [form/name form/email form/notes form/saved? form/selected
-                              form/fruit form/picker-open? form/confirm-open?]}]
-  ;; A flat root: its data lives at the top of the app db (no :ident/:initial-state, which
-  ;; keeps this example free of `com.fulcrologic.fulcro.components` and thus babashka-clean).
-  {:query [:form/name :form/email :form/notes :form/saved? :form/selected
-           :form/fruit :form/picker-open? :form/confirm-open?]}
+(comp/defsc Root [this {:keys [form/name form/email form/notes form/saved? form/selected
+                               form/fruit form/picker-open? form/confirm-open?]}]
+  ;; A flat root: its data lives at the top of the app db (no :ident). This is a standard Fulcro
+  ;; `defsc` component whose render returns a tree of TUI nodes; the TUI walker (`engine/render-tree`)
+  ;; drives it instead of React. Initial state is DECLARED here (the idiomatic Fulcro pattern) and
+  ;; `app/application` initializes the db from it by default — no manual state-atom reset needed.
+  {:query         [:form/name :form/email :form/notes :form/saved? :form/selected
+                   :form/fruit :form/picker-open? :form/confirm-open?]
+   :initial-state (fn [_] initial-db)}
   (let [field (fn [label id value k]
-                (tui/hbox {:height 1}
-                          (tui/text {:width 8 :color :cyan} label)
-                          (tui/input {:id        id
+                (elements/hbox {:height 1}
+                          (elements/text {:width 8 :color :cyan} label)
+                          (elements/input {:id        id
                                       :grow      1
                                       :color     :bright-white
                                       :value     (or value "")
                                       :on-change (fn [v _caret]
                                            ;; editing a field clears the prior "Saved!" status
-                                                   (tui/transact! this [(set-field {:k k :v v})
+                                                   (elements/transact! this [(set-field {:k k :v v})
                                                                         (set-field {:k :form/saved? :v false})]))})))]
-    (tui/vbox {:padding 1 :border? true :color :cyan}
-              (tui/text {:bold true :color :bright-cyan} "Fulcro TUI demo")
-              (tui/text {:color :bright-black} "Tab/Shift-Tab move focus · type to edit · Enter/Space activates · Ctrl-Q quits")
-              (tui/text {:color :bright-black} "PageUp/PageDown scroll the item list below")
-              (tui/line {})
+    (elements/vbox {:padding 1 :border? true :color :cyan}
+              (elements/text {:bold true :color :bright-cyan} "Fulcro TUI demo")
+              (elements/text {:color :bright-black} "Tab/Shift-Tab move focus · type to edit · Enter/Space activates · Ctrl-Q quits")
+              (elements/text {:color :bright-black} "PageUp/PageDown scroll the item list below")
+              (elements/line {})
       ;; A read-only paragraph that wraps to its fixed-width bordered box (40 wide => 38 content
       ;; columns; the box is tall enough to show all 5 wrapped lines).
-              (tui/text {:color :yellow} "About (read-only, wrapped):")
-              (tui/box {:width 40 :height 5 :border? true :color :bright-black}
-                       (tui/text {:wrap true} lorem))
-              (tui/line {})
+              (elements/text {:color :yellow} "About (read-only, wrapped):")
+              (elements/box {:width 40 :height 5 :border? true :color :bright-black}
+                       (elements/text {:wrap true} lorem))
+              (elements/line {})
               (field "Name:"  :name  name  :form/name)
               (field "Email:" :email email :form/email)
-              (tui/line {})
+              (elements/line {})
       ;; An editable multiline text-area wired to :form/notes. It grows to the available width,
       ;; is 4 rows tall, wraps its value, and self-scrolls to keep the caret visible.
-              (tui/text {:color :cyan} "Notes (multiline · Enter=newline · arrows move caret):")
+              (elements/text {:color :cyan} "Notes (multiline · Enter=newline · arrows move caret):")
       ;; Fixed height (4 rows) and fills the available width on the cross-axis. NOT :grow —
       ;; a fixed-size text box should not fight for leftover vertical space.
-              (tui/input {:id         :notes
+              (elements/input {:id         :notes
                           :multiline? true
                           :height     4
                           :color      :bright-white
                           :value      (or notes "")
                           :on-change  (fn [v _caret]
-                                        (tui/transact! this [(set-field {:k :form/notes :v v})
+                                        (elements/transact! this [(set-field {:k :form/notes :v v})
                                                              (set-field {:k :form/saved? :v false})]))})
-              (tui/line {})
-              (tui/hbox {:height 1}
-                        (tui/button {:id          :save
+              (elements/line {})
+              (elements/hbox {:height 1}
+                        (elements/button {:id          :save
                                      :color       (if saved? :bright-green :green)
                                      :bold        true
-                                     :highlight   (tui/focused? :save)
-                                     :on-activate (fn [] (tui/transact! this [(set-field {:k :form/saved? :v true})]))}
+                                     :highlight   (elements/focused? :save)
+                                     :on-activate (fn [] (elements/transact! this [(set-field {:k :form/saved? :v true})]))}
                                     (if saved? " Saved! " " Save "))
-                        (tui/text {:width 2} "")
+                        (elements/text {:width 2} "")
                 ;; Opens a plain modal confirmation dialog (see the :confirm modal below).
-                        (tui/button {:id          :reset
+                        (elements/button {:id          :reset
                                      :color       :bright-yellow
                                      :bold        true
-                                     :highlight   (tui/focused? :reset)
-                                     :on-activate (fn [] (tui/transact! this [(set-field {:k :form/confirm-open? :v true})]))}
+                                     :highlight   (elements/focused? :reset)
+                                     :on-activate (fn [] (elements/transact! this [(set-field {:k :form/confirm-open? :v true})]))}
                                     " Reset… "))
-              (tui/text {:color (if saved? :bright-green :bright-black)}
+              (elements/text {:color (if saved? :bright-green :bright-black)}
                         (str "name=" (pr-str name) "  email=" (pr-str email) "  saved?=" (boolean saved?)))
-              (tui/line {})
-              (tui/text {:color :yellow} (str "Items (Tab in, then arrows/PageUp/PageDown to scroll) — "
+              (elements/line {})
+              (elements/text {:color :yellow} (str "Items (Tab in, then arrows/PageUp/PageDown to scroll) — "
                                               "selected: " (if selected (str "Item " selected) "none")))
       ;; A fixed-height viewport of 15 focusable items; tabbing into it auto-scrolls.
-              (tui/viewport {:id :items :height 6 :border? true :color :bright-black}
-                            (tui/vbox {}
+              (elements/viewport {:id :items :height 6 :border? true :color :bright-black}
+                            (elements/vbox {}
                                       (for [i (range item-count)]
-                                        (tui/button {:id          (keyword (str "item-" i))
+                                        (elements/button {:id          (keyword (str "item-" i))
                                                      :color       (if (= selected i) :bright-green :cyan)
-                                                     :highlight   (tui/focused? (keyword (str "item-" i)))
-                                                     :on-activate (fn [] (tui/transact! this [(set-field {:k :form/selected :v i})]))}
+                                                     :highlight   (elements/focused? (keyword (str "item-" i)))
+                                                     :on-activate (fn [] (elements/transact! this [(set-field {:k :form/selected :v i})]))}
                                                     (str (if (= selected i) "● " "  ") "Item " i)))))
-              (tui/line {})
+              (elements/line {})
       ;; A button that opens a modal list picker. The picker overlays the whole UI, traps focus
       ;; (Up/Down to highlight, Enter to choose, Escape to cancel), and scrolls if the list is long.
-              (tui/button {:id          :pick-fruit
+              (elements/button {:id          :pick-fruit
                            :color       :bright-magenta
                            :bold        true
-                           :highlight   (tui/focused? :pick-fruit)
-                           :on-activate (fn [] (tui/transact! this [(set-field {:k :form/picker-open? :v true})]))}
+                           :highlight   (elements/focused? :pick-fruit)
+                           :on-activate (fn [] (elements/transact! this [(set-field {:k :form/picker-open? :v true})]))}
                           (str " Pick a fruit (" (if fruit (str/capitalize (clojure.core/name fruit)) "none") ") "))
       ;; The picker lives in the render tree always; it is shown only while :open? is truthy. Its
       ;; presence/selection are ordinary app state driven by the mutations above (the library owns none).
-              (tui/picker {:id        :fruit
+              (elements/picker {:id        :fruit
                            :open?     picker-open?
                            :title     "Pick a fruit"
                            :width     24
                            :height    8
                            :options   fruit-options
-                           :on-select (fn [v] (tui/transact! this [(set-field {:k :form/fruit :v v})
+                           :on-select (fn [v] (elements/transact! this [(set-field {:k :form/fruit :v v})
                                                                    (set-field {:k :form/picker-open? :v false})]))
-                           :on-cancel (fn [] (tui/transact! this [(set-field {:k :form/picker-open? :v false})]))})
-      ;; A plain `tui/modal` used directly (not via `picker`): a confirmation dialog with its own
+                           :on-cancel (fn [] (elements/transact! this [(set-field {:k :form/picker-open? :v false})]))})
+      ;; A plain `elements/modal` used directly (not via `picker`): a confirmation dialog with its own
       ;; focus-trapped buttons. While open, Tab/Shift-Tab cycle only between Reset and Cancel, Enter
       ;; activates the focused one, and Escape (or Cancel) dismisses it.
-              (let [close! (fn [] (tui/transact! this [(set-field {:k :form/confirm-open? :v false})]))]
-                (tui/modal {:id         :confirm
+              (let [close! (fn [] (elements/transact! this [(set-field {:k :form/confirm-open? :v false})]))]
+                (elements/modal {:id         :confirm
                             :open?      confirm-open?
                             :title      "Confirm reset"
                             :width      40
                             :height     7
                             :color      :red
                             :on-dismiss close!}
-                           (tui/text {:wrap true :color :bright-red}
+                           (elements/text {:wrap true :color :bright-red}
                                      "Reset every field to its initial value? This cannot be undone.")
-                           (tui/line {})
-                           (tui/hbox {:height 1 :align :center}
-                                     (tui/button {:id          :confirm-reset
+                           (elements/line {})
+                           (elements/hbox {:height 1 :align :center}
+                                     (elements/button {:id          :confirm-reset
                                                   :color       :bright-red
                                                   :bold        true
-                                                  :highlight   (tui/focused? :confirm-reset)
-                                                  :on-activate (fn [] (tui/transact! this [(reset-form {})])
+                                                  :highlight   (elements/focused? :confirm-reset)
+                                                  :on-activate (fn [] (elements/transact! this [(reset-form {})])
                                                                  (close!))}
                                                  " Reset ")
-                                     (tui/text {:width 2} "")
-                                     (tui/button {:id          :confirm-cancel
+                                     (elements/text {:width 2} "")
+                                     (elements/button {:id          :confirm-cancel
                                                   :color       :bright-green
                                                   :bold        true
-                                                  :highlight   (tui/focused? :confirm-cancel)
+                                                  :highlight   (elements/focused? :confirm-cancel)
                                                   :on-activate close!}
                                                  " Cancel ")))))))
 
 (defn -main
   "Builds the demo app and runs it on the system terminal until Ctrl-Q."
   [& _args]
-  (let [app (drv/application {:root-class Root})]
-    (reset! (:com.fulcrologic.fulcro.application/state-atom app) initial-db)
-    (drv/run-blocking! app {:global-keymap {[:ctrl "q"] (fn [a _e] (drv/quit! a))}})
+  ;; `app/application` initializes the db from Root's declared `:initial-state` by default, so no
+  ;; manual state-atom reset is needed here.
+  (let [app (app/application {:root-class Root})]
+    (app/run-blocking! app {:global-keymap {[:ctrl "q"] (fn [a _e] (app/quit! a))}})
     (println "Goodbye.")))

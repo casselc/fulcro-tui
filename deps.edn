@@ -1,7 +1,7 @@
 {:paths   ["src/main"]
 
  :deps    {com.fulcrologic/fulcro {:mvn/version "3.10.0-RC1"}
-           org.jline/jline       {:mvn/version "3.27.1"}}
+           org.jline/jline        {:mvn/version "3.27.1"}}
 
  :aliases {:test        {:extra-paths ["src/test"]
                          :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.8"
@@ -26,4 +26,12 @@
                          :main-opts  ["-m" "kaocha.runner"]}
 
            :tui         {:extra-paths ["src/tui-example"]
-                         :main-opts   ["-m" "tui-example.form"]}}}
+                         :main-opts   ["-m" "tui-example.form"]}
+
+           ;; DEBUG ONLY (JVM, not babashka): turns on the Fulcro Inspect shim via
+           ;; -Dtui.inspect=true. The shim (`com.fulcrologic.fulcro.tui.inspect`) now lives in
+           ;; src/main (always on the classpath, loaded on demand), so this alias only sets the
+           ;; system property, which flips `application`'s `:inspect?` default on. Combine with
+           ;; :tui, e.g. `clojure -M:tui:inspect`. Requires the standalone Fulcro Inspect (Electron)
+           ;; app running on localhost:8237.
+           :inspect     {:jvm-opts ["-Dtui.inspect=true"]}}}

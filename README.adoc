@@ -9,7 +9,7 @@ Fulcro has always been full-stack CLJC in all ways (rendering and server process
 
 This library (finally& provides an alternative rendering target: The terminal!
 
-it lays out a tree of terminal-native nodes (boxes, text, inputs, buttons) and paints them into a character-cell buffer that is displayed in a real terminal via JLine. Components are written with the familiar `tui/defsc` macro and driven by the same Fulcro data-management primitives (mutations, normalized state, transactions).
+it lays out a tree of terminal-native nodes (boxes, text, inputs, buttons) and paints them into a character-cell buffer that is displayed in a real terminal via JLine. Components are written with Fulcro's standard `defsc` macro (their render simply returns a tree of terminal nodes) and driven by the same Fulcro data-management primitives (mutations, normalized state, transactions).
 
 The result is a Fulcro/React-like experience with a terminal UI.
 

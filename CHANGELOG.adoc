@@ -2,14 +2,14 @@
 
 == Unreleased
 
-Initial extraction of the terminal (TUI) rendering target out of the Fulcro repository into this standalone companion library. Namespaces (`com.fulcrologic.fulcro.tui`, `…tui.terminal`, `…tui.driver`) and the `tui-example.form` demo are unchanged from their in-tree origin.
+Initial extraction of the terminal (TUI) rendering target out of the Fulcro repository into this standalone companion library. Namespaces: `com.fulcrologic.fulcro.tui.elements` (element generators), `…tui.engine` (layout/paint/focus/input pipeline + node vocabulary), `…tui.application` (lifecycle + render driver), `…tui.terminal` (Terminal protocol + JLine/string backends), and `…tui.inspect` (dev-only Fulcro Inspect shim). The `tui-example.form` demo exercises the full stack.
 
 Included capabilities:
 
 * Element generators (`vbox`, `hbox`, `box`, `text`, `input`, `button`, `line`, `viewport`) and the node model.
 * Layout (intrinsic sizing, placement, clamping/scrolling helpers).
 * Buffer rendering and diffing (cell/char buffers, SGR styling, ANSI emission, frame diff -> ops -> ANSI).
-* Component walker plus `tui/defsc` (factory, computed-factory, render-instance/tree/root).
+* Component walker for standard Fulcro `defsc` components whose render returns terminal nodes (factory, computed-factory, render-instance/tree/root).
 * Focus management, text input editing, and key routing.
 * Terminal protocol with a JLine-backed terminal and a fake/string terminal for tests.
 * The `driver` (application creation, attach/mount/render, step, run loop, quit).

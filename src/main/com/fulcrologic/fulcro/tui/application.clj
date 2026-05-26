@@ -1,35 +1,38 @@
-(ns com.fulcrologic.fulcro.tui.driver
-  "The side-effecting *driver* for the TUI rendering target: it renders a Fulcro app to a terminal
-   and runs the input loop.
+(ns com.fulcrologic.fulcro.tui.application
+  "The application/lifecycle front door for the TUI rendering target: build a Fulcro app, attach a
+   terminal, run the input loop, and stop it. This is also where the side-effecting render driver
+   lives (it renders a Fulcro app to a terminal and runs the keyboard input loop).
 
-   This is the edge that ties together the pure TUI pipeline in `com.fulcrologic.fulcro.tui` (layout,
-   paint, diff, focus, input) with a concrete `com.fulcrologic.fulcro.tui.terminal/Terminal`. Use
+   This is the edge that ties together the pure TUI pipeline in `com.fulcrologic.fulcro.tui.engine`
+   (layout, paint, diff, focus, input) and the element generators in
+   `com.fulcrologic.fulcro.tui.elements` with a concrete `com.fulcrologic.fulcro.tui.terminal/Terminal`. Use
    `application` to build a synchronous raw Fulcro app whose renders repaint the terminal, `mount!`
-   (or `run!`) to attach a terminal and start the keyboard input loop, and `step!` to drive a single
-   deterministic iteration (used by tests).
+   (or `run-blocking!`) to attach a terminal and start the keyboard input loop, `quit!` to stop it,
+   and `step!` to drive a single deterministic iteration (used by tests).
 
    State/runtime keys (single source of truth):
-     * Focus & carets & scroll are owned by `com.fulcrologic.fulcro.tui` (see that ns).
+     * Focus & carets & scroll are owned by `com.fulcrologic.fulcro.tui.engine` (see that ns).
      * The attached terminal and the bookkeeping for incremental painting live in the app
        RUNTIME-ATOM under this namespace's keys (see `::terminal`, `::prev-buffer`, `::placed`,
        `::last-size`).
 
    This is JVM/babashka only (plain `.clj`).
 
-   Viewport scrolling: `tui/place` lays a viewport's single child out at its natural size into a
-   virtual rect, and `tui/render-buffer` blits only the window `[scroll-x scroll-y w h]` of that
+   Viewport scrolling: `engine/place` lays a viewport's single child out at its natural size into a
+   virtual rect, and `engine/render-buffer` blits only the window `[scroll-x scroll-y w h]` of that
    virtual content into the viewport's `::rect`. Scroll offsets are stored in the state-map under
-   `:com.fulcrologic.fulcro.tui/scroll` keyed by viewport id; `render!` injects them onto the placed
+   `:com.fulcrologic.fulcro.tui.engine/scroll` keyed by viewport id; `render!` injects them onto the placed
    tree (`inject-scroll`), `follow-focus!` advances them after focus changes to keep the focused node
    visible, and PageUp/PageDown page-scroll via `viewport-scroll-key!`. Up/Down arrows move focus
-   item-to-item (in `tui/process-key!`) and `follow-focus!` autoscrolls to track the focused item."
+   item-to-item (in `engine/process-key!`) and `follow-focus!` autoscrolls to track the focused item."
   (:require
    [clojure.spec.alpha :as s]
    [com.fulcrologic.fulcro.algorithms.denormalize :as fdn]
    [com.fulcrologic.fulcro.algorithms.tx-processing.synchronous-tx-processing :as stx]
    [com.fulcrologic.fulcro.raw.application :as rapp]
    [com.fulcrologic.fulcro.raw.components :as rc]
-   [com.fulcrologic.fulcro.tui :as tui]
+   [com.fulcrologic.fulcro.tui.engine :as engine]
+   [com.fulcrologic.fulcro.tui.elements :as elements]
    [com.fulcrologic.fulcro.tui.terminal :as term]
    [com.fulcrologic.guardrails.core :refer [>def >defn >defn- => ?]]))
 
@@ -73,8 +76,8 @@
    `:min-height` attrs of the root node and defaulting each to 1."
         [node-tree]
         [any? => ::min-size]
-        {:min-width  (long (or (tui/node-attr node-tree :min-width) 1))
-         :min-height (long (or (tui/node-attr node-tree :min-height) 1))})
+        {:min-width  (long (or (engine/node-attr node-tree :min-width) 1))
+         :min-height (long (or (engine/node-attr node-tree :min-height) 1))})
 
 (>defn too-small-buffer
        "Returns a `rows`x`cols` cell buffer painted with a centered \"terminal too small\" message asking
@@ -82,10 +85,10 @@
        [rows cols min-w min-h]
        [nat-int? nat-int? int? int? => map?]
        (let [msg (str "terminal too small — need " min-w "x" min-h)
-             node (tui/place
-                   (tui/text {} msg)
+             node (engine/place
+                   (elements/text {} msg)
                    {:x 0 :y 0 :w cols :h rows})]
-         (tui/render-buffer node rows cols)))
+         (engine/render-buffer node rows cols)))
 
 (>defn- caret-screen-position
         "Returns `[x y visible?]` for the hardware cursor given the placed `focused-node` (or `nil`), its
@@ -95,10 +98,10 @@
    For a single-line `:input`, the cursor is placed at the rect origin advanced by the display width of
    the value up to `caret`, clamped to lie within the rect, and visible.
 
-   For a multiline `:input` (`tui/multiline-input?`), the value is wrapped to the rect's width, the
-   caret's visual `[row col]` is computed (`tui/caret->rowcol`), and the cursor is placed at
+   For a multiline `:input` (`engine/multiline-input?`), the value is wrapped to the rect's width, the
+   caret's visual `[row col]` is computed (`engine/caret->rowcol`), and the cursor is placed at
    `rect-origin + (row - top-line, col)` where `top-line` is the input's injected internal scroll
-   (`::tui/text-scroll`). If that visual row is scrolled out of the rect's `[0, h)` window the cursor
+   (`::engine/text-scroll`). If that visual row is scrolled out of the rect's `[0, h)` window the cursor
    is hidden.
 
    For any other focused node the cursor is placed (visible) at the rect origin. When `rect` is `nil`
@@ -107,11 +110,11 @@
         [(? map?) (? map?) int? => ::caret-pos]
         (if rect
           (cond
-            (tui/multiline-input? focused-node)
-            (let [value     (str (tui/node-attr focused-node :value))
+            (engine/multiline-input? focused-node)
+            (let [value     (str (engine/node-attr focused-node :value))
                   width     (:w rect)
-                  top       (max 0 (long (or (::tui/text-scroll focused-node) 0)))
-                  [row col] (tui/caret->rowcol value width caret)
+                  top       (max 0 (long (or (::engine/text-scroll focused-node) 0)))
+                  [row col] (engine/caret->rowcol value width caret)
                   vy        (- row top)
                   visible?  (and (>= vy 0) (< vy (:h rect)))
                   max-x     (max (:x rect) (+ (:x rect) (dec (:w rect))))
@@ -119,10 +122,10 @@
                   y         (+ (:y rect) vy)]
               [x y visible?])
 
-            (= :input (::tui/tag focused-node))
-            (let [value   (str (tui/node-attr focused-node :value))
+            (= :input (::engine/tag focused-node))
+            (let [value   (str (engine/node-attr focused-node :value))
                   c       (max 0 (min caret (count value)))
-                  advance (tui/string-width (subs value 0 c))
+                  advance (engine/string-width (subs value 0 c))
                   max-x   (max (:x rect) (+ (:x rect) (dec (:w rect))))
                   x       (min max-x (+ (:x rect) advance))
                   y       (:y rect)]
@@ -132,21 +135,21 @@
           [0 0 false]))
 
 (>defn- focused-screen-rect
-        "Returns the on-screen `::tui/rect` for the focused node `focus-id` within `placed`, accounting for an
+        "Returns the on-screen `::engine/rect` for the focused node `focus-id` within `placed`, accounting for an
    enclosing scrolled viewport, or `nil` when the focused node is scrolled out of its viewport's window.
-   For a node NOT inside a viewport, returns the node's own placed `::tui/rect` (its absolute rect).
+   For a node NOT inside a viewport, returns the node's own placed `::engine/rect` (its absolute rect).
    For a node inside a viewport, its on-screen rect is `viewport-content-origin + (virtual-origin -
    scroll)`; if that lands outside the viewport's content window, `nil` is returned (cursor hidden)."
         [app placed focus-id]
         [any? any? any? => (? map?)]
-        (if-let [{:keys [viewport virtual-rect]} (tui/focus-viewport-context placed focus-id)]
-          (let [vp-id   (tui/node-attr viewport :id)
-                scroll  (if (some? vp-id) (tui/viewport-scroll app vp-id) (or (::tui/scroll viewport) {:x 0 :y 0}))
-                vsize   (::tui/virtual-size viewport)
-                cv      (tui/content-view-size viewport)
-                scroll  (tui/clamp-scroll scroll vsize cv)
-                vp-rect (::tui/rect viewport)
-                e       (+ (long (or (:padding (::tui/attrs viewport)) 0)) (if (:border? (::tui/attrs viewport)) 1 0))
+        (if-let [{:keys [viewport virtual-rect]} (engine/focus-viewport-context placed focus-id)]
+          (let [vp-id   (engine/node-attr viewport :id)
+                scroll  (if (some? vp-id) (engine/viewport-scroll app vp-id) (or (::engine/scroll viewport) {:x 0 :y 0}))
+                vsize   (::engine/virtual-size viewport)
+                cv      (engine/content-view-size viewport)
+                scroll  (engine/clamp-scroll scroll vsize cv)
+                vp-rect (::engine/rect viewport)
+                e       (+ (long (or (:padding (::engine/attrs viewport)) 0)) (if (:border? (::engine/attrs viewport)) 1 0))
                 ox      (+ (:x vp-rect) e)
                 oy      (+ (:y vp-rect) e)
                 sx      (+ ox (- (:x virtual-rect) (:x scroll)))
@@ -154,86 +157,86 @@
             (when (and (>= sy oy) (< sy (+ oy (:h cv)))
                        (>= sx ox) (< sx (+ ox (:w cv))))
               {:x sx :y sy :w (:w virtual-rect) :h (:h virtual-rect)}))
-          (some-> (tui/find-by-id placed focus-id) ::tui/rect)))
+          (some-> (engine/find-by-id placed focus-id) ::engine/rect)))
 
 (>defn- position-cursor!
         "Positions the hardware cursor of `terminal` for `app` against the `placed` tree: finds the focused
-   node (`tui/current-focus`), computes its on-screen rect (via `focused-screen-rect`, which accounts
+   node (`engine/current-focus`), computes its on-screen rect (via `focused-screen-rect`, which accounts
    for a scrolled enclosing viewport and hides the cursor when the focused node is scrolled out of
    view), computes its caret position, and calls `term/t-set-cursor!`. Returns `app`."
         [app terminal placed]
         [any? any? any? => any?]
-        (let [focus-id     (tui/current-focus app)
-              focused-node (when (some? focus-id) (tui/find-by-id placed focus-id))
+        (let [focus-id     (engine/current-focus app)
+              focused-node (when (some? focus-id) (engine/find-by-id placed focus-id))
               screen-rect  (when (some? focus-id) (focused-screen-rect app placed focus-id))
-              value        (str (tui/node-attr focused-node :value))
-              caret        (if (some? focus-id) (tui/get-caret app focus-id (count value)) 0)
+              value        (str (engine/node-attr focused-node :value))
+              caret        (if (some? focus-id) (engine/get-caret app focus-id (count value)) 0)
               [x y vis?]   (caret-screen-position focused-node screen-rect caret)]
           (term/t-set-cursor! terminal x y vis?)
           app))
 
 (>defn- inject-scroll
         "Returns the placed `tree` with scroll state injected for the next paint, and records each multiline
-   input's effective wrap width on `app`'s runtime (`tui/set-input-width!`).
+   input's effective wrap width on `app`'s runtime (`engine/set-input-width!`).
 
-   For every `:viewport` node it sets `::tui/scroll` from `app`'s scroll state (the state-map key
-   `::tui/scroll`, keyed by viewport id), clamped via `tui/clamp-scroll` against the viewport's
-   `::tui/virtual-size` and its content-area view size. Viewports without an `:id` keep their default
+   For every `:viewport` node it sets `::engine/scroll` from `app`'s scroll state (the state-map key
+   `::engine/scroll`, keyed by viewport id), clamped via `engine/clamp-scroll` against the viewport's
+   `::engine/virtual-size` and its content-area view size. Viewports without an `:id` keep their default
    `{:x 0 :y 0}`.
 
-   For every multiline `:input` node (`tui/multiline-input?`) it records the input's content width
+   For every multiline `:input` node (`engine/multiline-input?`) it records the input's content width
    (its placed content-area width) so key handling wraps at the painted width, then computes the
-   internal top visual-line offset (`tui/text-scroll-top`) from the input's caret so the caret row
-   stays visible, and assocs it under `::tui/text-scroll`.
+   internal top visual-line offset (`engine/text-scroll-top`) from the input's caret so the caret row
+   stays visible, and assocs it under `::engine/text-scroll`.
 
    Walks the placed tree (including nested viewport content)."
         [app tree]
         [any? any? => any?]
         (letfn [(walk [x]
-                  (if (tui/node? x)
+                  (if (engine/node? x)
                     (let [x (cond
-                              (tui/viewport? x)
-                              (let [id     (tui/node-attr x :id)
-                                    scroll (if (some? id) (tui/viewport-scroll app id) (::tui/scroll x))
-                                    scroll (tui/clamp-scroll scroll (::tui/virtual-size x) (tui/content-view-size x))]
-                                (assoc x ::tui/scroll scroll))
+                              (engine/viewport? x)
+                              (let [id     (engine/node-attr x :id)
+                                    scroll (if (some? id) (engine/viewport-scroll app id) (::engine/scroll x))
+                                    scroll (engine/clamp-scroll scroll (::engine/virtual-size x) (engine/content-view-size x))]
+                                (assoc x ::engine/scroll scroll))
 
-                              (tui/multiline-input? x)
-                              (let [id    (tui/node-attr x :id)
-                                    width (:w (tui/content-view-size x))
-                                    value (str (tui/node-attr x :value))
-                                    h     (:h (tui/content-view-size x))
-                                    caret (if (some? id) (tui/get-caret app id (count value)) (count value))]
-                                (when (some? id) (tui/set-input-width! app id width))
-                                (assoc x ::tui/text-scroll (tui/text-scroll-top value width caret h)))
+                              (engine/multiline-input? x)
+                              (let [id    (engine/node-attr x :id)
+                                    width (:w (engine/content-view-size x))
+                                    value (str (engine/node-attr x :value))
+                                    h     (:h (engine/content-view-size x))
+                                    caret (if (some? id) (engine/get-caret app id (count value)) (count value))]
+                                (when (some? id) (engine/set-input-width! app id width))
+                                (assoc x ::engine/text-scroll (engine/text-scroll-top value width caret h)))
 
                               :else x)
-                          x (update x ::tui/children (fn [cs] (mapv walk cs)))]
-                      (if-let [vc (::tui/viewport-content x)]
-                        (assoc x ::tui/viewport-content (walk vc))
+                          x (update x ::engine/children (fn [cs] (mapv walk cs)))]
+                      (if-let [vc (::engine/viewport-content x)]
+                        (assoc x ::engine/viewport-content (walk vc))
                         x))
                     x))]
           (walk tree)))
 
 (>defn follow-focus!
        "Adjusts viewport scroll state so the currently focused node stays visible, then returns `app`.
-   Using the `placed` tree, finds the focused node's enclosing viewport (`tui/focus-viewport-context`)
+   Using the `placed` tree, finds the focused node's enclosing viewport (`engine/focus-viewport-context`)
    and the focused node's VIRTUAL rect. Computes the minimal scroll that brings that rect into the
-   viewport's content window (`tui/scroll-to-show`), clamps it (`tui/clamp-scroll`), and writes it to
-   the viewport's scroll state (`tui/set-viewport-scroll!`) when it differs. A no-op when the focused
+   viewport's content window (`engine/scroll-to-show`), clamps it (`engine/clamp-scroll`), and writes it to
+   the viewport's scroll state (`engine/set-viewport-scroll!`) when it differs. A no-op when the focused
    node is not inside a viewport or the enclosing viewport has no `:id`."
        [app placed]
        [any? any? => any?]
-       (let [focus-id (tui/current-focus app)]
+       (let [focus-id (engine/current-focus app)]
          (when (some? focus-id)
-           (when-let [{:keys [viewport virtual-rect]} (tui/focus-viewport-context placed focus-id)]
-             (when-let [vp-id (tui/node-attr viewport :id)]
-               (let [vsize     (::tui/virtual-size viewport)
-                     cr        (tui/content-view-size viewport)
-                     current   (tui/viewport-scroll app vp-id)
-                     desired   (tui/clamp-scroll (tui/scroll-to-show current virtual-rect cr) vsize cr)]
+           (when-let [{:keys [viewport virtual-rect]} (engine/focus-viewport-context placed focus-id)]
+             (when-let [vp-id (engine/node-attr viewport :id)]
+               (let [vsize     (::engine/virtual-size viewport)
+                     cr        (engine/content-view-size viewport)
+                     current   (engine/viewport-scroll app vp-id)
+                     desired   (engine/clamp-scroll (engine/scroll-to-show current virtual-rect cr) vsize cr)]
                  (when (not= current desired)
-                   (tui/set-viewport-scroll! app vp-id desired))))))
+                   (engine/set-viewport-scroll! app vp-id desired))))))
          app))
 
 (>defn- viewport-scroll-key!
@@ -242,30 +245,30 @@
    (unhandled) otherwise, so the caller falls through to the normal key pipeline. `placed` is the
    current placed tree (for locating the enclosing viewport).
 
-   `:up`/`:down` are NOT handled here: they drive focus navigation in `tui/process-key!` (moving
+   `:up`/`:down` are NOT handled here: they drive focus navigation in `engine/process-key!` (moving
    focus item-to-item through the focus ring), and `follow-focus!` keeps the focused item visible —
    so arrowing through a focusable list autoscrolls its viewport. PageUp/PageDown remain the explicit
    page-scroll for a focused viewport."
         [app placed key-event]
         [any? any? map? => any?]
         (let [k        (:key key-event)
-              focus-id (tui/current-focus app)
-              ctx      (when (some? focus-id) (tui/focus-viewport-context placed focus-id))
+              focus-id (engine/current-focus app)
+              ctx      (when (some? focus-id) (engine/focus-viewport-context placed focus-id))
               viewport (:viewport ctx)
-              vp-id    (when viewport (tui/node-attr viewport :id))]
+              vp-id    (when viewport (engine/node-attr viewport :id))]
           (when (and viewport (some? vp-id))
-            (let [vsize  (::tui/virtual-size viewport)
-                  cr     (tui/content-view-size viewport)
+            (let [vsize  (::engine/virtual-size viewport)
+                  cr     (engine/content-view-size viewport)
                   view-h (:h cr)
                   page   (max 1 (dec view-h))
-                  cur    (tui/viewport-scroll app vp-id)
+                  cur    (engine/viewport-scroll app vp-id)
                   dy     (cond
                            (= k :page-down) page
                            (= k :page-up)   (- page)
                            :else            nil)]
               (when dy
-                (let [next (tui/clamp-scroll (update cur :y + dy) vsize cr)]
-                  (tui/set-viewport-scroll! app vp-id next)
+                (let [next (engine/clamp-scroll (update cur :y + dy) vsize cr)]
+                  (engine/set-viewport-scroll! app vp-id next)
                   :handled))))))
 
 (>defn render!
@@ -295,27 +298,29 @@
                    root-class     (root-class-key rt)
                    query          (rc/get-query root-class state-map)
                    tree           (fdn/db->tree query state-map state-map)
-                   full-tree      (binding [tui/*app*           app
-                                            tui/*current-focus* (tui/current-focus app)]
-                                    (tui/render-root root-class tree app))
+                   ;; `engine/render-root` binds Fulcro's render-time dynamic vars (comp/*app* etc.)
+                   ;; itself from the `app` arg; here we only need the TUI-specific focus var so
+                   ;; `elements/focused?` resolves during the component renders.
+                   full-tree      (binding [engine/*current-focus* (engine/current-focus app)]
+                                    (engine/render-root root-class tree app))
                    ;; Overlays (open `:modal` nodes) are composited on top of the base UI; the base is
                    ;; laid out from the tree with all modals stripped, and the topmost overlay is placed
                    ;; into its own screen window. Focus/cursor/scroll track the active layer.
-                   base-tree      (tui/strip-overlays full-tree)
-                   overlay        (peek (tui/collect-overlays full-tree))
+                   base-tree      (engine/strip-overlays full-tree)
+                   overlay        (peek (engine/collect-overlays full-tree))
                    {:keys [rows cols]} (term/t-size terminal)
                    {:keys [min-width min-height]} (root-min base-tree)
                    too-small?     (or (< cols min-width) (< rows min-height))
                    screen         {:x 0 :y 0 :w cols :h rows}
                    base-placed    (when-not too-small?
-                                    (inject-scroll app (tui/place base-tree screen)))
+                                    (inject-scroll app (engine/place base-tree screen)))
                    overlay-placed (when (and (not too-small?) overlay)
-                                    (inject-scroll app (tui/place overlay (tui/overlay-window-rect overlay screen))))
+                                    (inject-scroll app (engine/place overlay (engine/overlay-window-rect overlay screen))))
                    active-placed  (or overlay-placed base-placed)
                    buf            (if too-small?
                                     (too-small-buffer rows cols min-width min-height)
-                                    (cond-> (tui/render-buffer base-placed rows cols)
-                                      overlay-placed (tui/paint overlay-placed screen)))
+                                    (cond-> (engine/render-buffer base-placed rows cols)
+                                      overlay-placed (engine/paint overlay-placed screen)))
                    last-size      (::last-size rt)
                    size           {:rows rows :cols cols}
                    resized?       (boolean (and last-size (not= last-size size)))
@@ -323,8 +328,8 @@
                    ;; On a resize the whole screen is repainted from scratch (`:clear?`): a plain full
                    ;; repaint only writes non-blank cells, so without clearing, stale content from the
                    ;; old size would linger on screen.
-                   ansi           (tui/frame->ansi prev buf {:sync?  (term/t-sync-supported? terminal)
-                                                             :clear? resized?})]
+                   ansi           (engine/frame->ansi prev buf {:sync?  (term/t-sync-supported? terminal)
+                                                                :clear? resized?})]
                (term/t-write! terminal ansi)
                ;; Position the cursor AFTER the frame's drawing and flush once, so the cursor-move is
                ;; the last terminal command of the frame (otherwise the diff's writes leave the hardware
@@ -358,7 +363,7 @@
      1. Viewport scroll keys (`viewport-scroll-key!`): if the focused node lies inside a viewport and
         `key-event` is PageUp/PageDown (or `:up`/`:down` on a non-input focus), the enclosing viewport
         is scrolled and the focus/input pipeline is skipped.
-     2. Otherwise `tui/process-key!` handles focus/typing/activation/global-keymap.
+     2. Otherwise `engine/process-key!` handles focus/typing/activation/global-keymap.
      3. `follow-focus!` then adjusts viewport scroll so the (possibly newly) focused node stays visible.
 
    The placed tree from the previous frame is used to locate the enclosing viewport for steps 1 & 3."
@@ -371,7 +376,7 @@
           (if (and placed (viewport-scroll-key! app placed key-event))
             (render! app)
             (do
-              (tui/process-key! app key-event global-keymap)
+              (engine/process-key! app key-event global-keymap)
               (follow-focus! app (or (placed-tree-of app) placed))
               (render! app))))
         app))
@@ -385,13 +390,13 @@
    initial focus. Returns `nil` if the app has no state/root yet."
         [app]
         [any? => any?]
-        (tui/current-node-tree app))
+        (engine/current-node-tree app))
 
 (>defn attach!
        "Attaches `terminal` to `app` and performs the initial paint. Stashes the terminal in the runtime
    atom, enters the terminal (`term/t-enter!`), registers a resize handler that repaints on a terminal
    size change (`t-on-resize!` → `render!`), sets initial focus to the first node in the current tree's
-   `focus-order` when `::tui/focus` is unset, and renders once. Returns `app`. Starts no loop."
+   `focus-order` when `::engine/focus` is unset, and renders once. Returns `app`. Starts no loop."
        [app terminal]
        [any? any? => any?]
        (swap! (runtime-atom-key app) assoc ::terminal terminal)
@@ -399,12 +404,12 @@
        ;; Repaint when the terminal is resized. `render!` reads the fresh size and full-repaints with a
        ;; clear, so the layout self-corrects without waiting for a keypress.
        (term/t-on-resize! terminal (fn [] (render! app)))
-       (when (nil? (tui/current-focus app))
+       (when (nil? (engine/current-focus app))
          ;; Initial focus comes from the active layer (a startup overlay if one is open, else the base
          ;; tree with closed modals stripped) so it never lands inside an inactive modal.
-         (let [order (tui/focus-order (tui/focusables (tui/active-tree (initial-node-tree app))))]
+         (let [order (engine/focus-order (engine/focusables (engine/active-tree (initial-node-tree app))))]
            (when-let [first-id (:id (first order))]
-             (tui/focus! app first-id))))
+             (engine/focus! app first-id))))
        (render! app)
        app)
 
@@ -434,7 +439,7 @@
                                ;; Global/reserved chords (e.g. quit) are dispatched at the loop
                                ;; level so they fire regardless of which node has focus; everything
                                ;; else goes through the focus/input pipeline via `step!`.
-                                    (if-let [h (and global-keymap (get global-keymap (tui/key-chord k)))]
+                                    (if-let [h (and global-keymap (get global-keymap (engine/key-chord k)))]
                                       (h app k)
                                       (step! app k))
                                     (recur)))))
@@ -484,15 +489,27 @@
        "Returns a synchronous raw Fulcro app suitable for TUI rendering. Builds a `rapp/fulcro-app` with
    synchronous transactions (`stx/with-synchronous-transactions`), the given `:root-class`, optional
    `:remotes`, and render hooks wired so that every state-change repaints through `render!` (when a
-   terminal has been attached). When `:initial-state` is provided the app's state is initialized from
-   the root class. `opts`:
+   terminal has been attached). By DEFAULT the app's state is initialized from the root class's
+   declared `:initial-state` (the idiomatic Fulcro pattern — initial state is declared on Root and
+   composes down the UI tree). This mirrors `com.fulcrologic.fulcro.application/fulcro-app`'s
+   `:initialize-state?`, which also defaults true (application.cljc:323). `opts`:
 
-     * `:root-class`    - the (required) TUI root component class (built with `tui/defsc`).
-     * `:initial-state` - when truthy, initialize app state from `root-class`.
+     * `:root-class`    - the (required) TUI root component class (built with `com.fulcrologic.fulcro.components/defsc`).
+     * `:initial-state` - (default true) initialize app state from `root-class`'s `:initial-state`.
+                          Pass `false` to skip (advanced: e.g. you intend to install state yourself).
      * `:remotes`       - optional Fulcro remotes map.
+     * `:inspect?`      - DEBUG ONLY (JVM, not babashka). When truthy, attaches Fulcro Inspect so a
+                          running standalone Inspect (Electron) app on localhost:8237 observes this
+                          app's transactions / network / state. Defaults to the `tui.inspect` system
+                          property (`-Dtui.inspect=true`). The shim
+                          (`com.fulcrologic.fulcro.tui.inspect`) ships in the library (`src/main`) but
+                          is loaded lazily via `requiring-resolve` only when this is truthy, so normal
+                          and babashka runs never load it (and its devtools deps stay off the path).
 
    No terminal is attached here; attach one with `attach!`/`mount!`."
-       [{:keys [root-class initial-state remotes]}]
+       [{:keys [root-class remotes inspect?]
+         :or   {inspect? (= "true" (System/getProperty "tui.inspect"))}
+         :as   opts}]
        [map? => any?]
        (let [app (stx/with-synchronous-transactions
                    (rapp/fulcro-app
@@ -503,8 +520,12 @@
                              :optimized-render! (fn [_app _opts] true)
                              :render-root!      (constantly true)}
                       remotes (assoc :remotes remotes))))]
-         (when initial-state
+         ;; Default-on: initialize from the Root's declared :initial-state unless the caller
+         ;; explicitly opts out with `:initial-state false`.
+         (when (get opts :initial-state true)
            (rapp/initialize-state! app root-class))
+         (when inspect?
+           ((requiring-resolve 'com.fulcrologic.fulcro.tui.inspect/add-inspect!) app))
          app))
 
 ;; ============================================================================
@@ -512,15 +533,15 @@
 ;; ============================================================================
 
 (>defn screen-of
-       "Returns the `tui/screen` (vector of row strings) of the buffer most recently painted for `app`, or
+       "Returns the `engine/screen` (vector of row strings) of the buffer most recently painted for `app`, or
    `nil` if nothing has been painted yet."
        [app]
        [any? => (? vector?)]
-       (some-> (runtime app) ::prev-buffer tui/screen))
+       (some-> (runtime app) ::prev-buffer engine/screen))
 
 (>defn screen-styled-of
-       "Returns the `tui/screen-styled` (vector of rows of styled cell maps) of the buffer most recently
+       "Returns the `engine/screen-styled` (vector of rows of styled cell maps) of the buffer most recently
    painted for `app`, or `nil` if nothing has been painted yet."
        [app]
        [any? => (? vector?)]
-       (some-> (runtime app) ::prev-buffer tui/screen-styled))
+       (some-> (runtime app) ::prev-buffer engine/screen-styled))
