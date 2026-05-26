@@ -986,8 +986,16 @@
              (reduce
               (fn [{:keys [out pen]} {:keys [row col sgr text]}]
                 (let [move (str "[" (inc row) ";" (inc col) "H")
-                      sgr? (not= pen sgr)]
-                  {:out (str out move (when sgr? (sgr-string sgr)) text)
+                      sgr?   (not= pen sgr)
+                      ;; SGR codes are additive on the wire, so turning an attribute OFF (a code in
+                      ;; `pen` that is absent from `sgr`) needs an explicit reset first — otherwise it
+                      ;; leaks into this run (e.g. reverse video bleeding from a newly-focused element
+                      ;; onto the unfocused one to its right). Pure additions (pen ⊆ sgr) need no
+                      ;; reset; a change to the default style already emits a reset via `sgr-string`.
+                      reset? (and (seq sgr) (not (every? (set sgr) pen)))]
+                  {:out (str out move
+                             (when sgr? (str (when reset? (sgr-string [])) (sgr-string sgr)))
+                             text)
                    :pen sgr}))
               {:out "" :pen []}
               ops)]

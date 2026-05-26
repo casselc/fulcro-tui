@@ -617,7 +617,7 @@
                              "emits a full repaint when prev has different dimensions"
                              (tui/diff (tui/make-buffer 2 5) ab) => [{:row 0 :col 0 :sgr [] :text "abc"}]))))
 
-(specification {:covers {`tui/ops->ansi "4c4047,2ef542"}} "ops->ansi"
+(specification {:covers {`tui/ops->ansi "856e75,2ef542"}} "ops->ansi"
                (assertions
                 "emits a cursor move (row+1;col+1) then an SGR then the text"
                 (tui/ops->ansi [{:row 1 :col 2 :sgr [31] :text "hi"}]) => "[2;3H[31mhi[0m"
@@ -627,10 +627,16 @@
                 "emits a new SGR when the pen style changes between ops"
                 (tui/ops->ansi [{:row 0 :col 0 :sgr [31] :text "a"} {:row 0 :col 3 :sgr [] :text "b"}])
                 => "[1;1H[31ma[1;4H[0mb"
+                "resets before a style that drops an attribute, so reverse video does not leak into the next run"
+                (tui/ops->ansi [{:row 0 :col 0 :sgr [7] :text "a"} {:row 0 :col 3 :sgr [31] :text "b"}])
+                => "[1;1H[7ma[1;4H[0m[31mb[0m"
+                "does not reset when the new style only ADDS codes (output stays minimal)"
+                (tui/ops->ansi [{:row 0 :col 0 :sgr [31] :text "a"} {:row 0 :col 3 :sgr [1 31] :text "b"}])
+                => "[1;1H[31ma[1;4H[1;31mb[0m"
                 "returns the empty string for no ops"
                 (tui/ops->ansi []) => ""))
 
-(specification {:covers {`tui/frame->ansi "9eafc2,ddde12"}} "frame->ansi"
+(specification {:covers {`tui/frame->ansi "9eafc2,5c8058"}} "frame->ansi"
                (let [b1  (tui/make-buffer 1 5)
                      nxt (tui/put-str b1 0 0 "X" {} {:x 0 :y 0 :w 5 :h 1})]
                  (assertions
@@ -639,7 +645,7 @@
                   "does not wrap the diff when :sync? is false"
                   (tui/frame->ansi b1 nxt {:sync? false}) => "[1;1HX")))
 
-(specification {:covers {`tui/frame->ansi "9eafc2,ddde12"}} "frame->ansi — clear-screen on resize"
+(specification {:covers {`tui/frame->ansi "9eafc2,5c8058"}} "frame->ansi — clear-screen on resize"
                (let [b1  (tui/make-buffer 1 5)
                      nxt (tui/put-str b1 0 0 "X" {} {:x 0 :y 0 :w 5 :h 1})]
                  (assertions

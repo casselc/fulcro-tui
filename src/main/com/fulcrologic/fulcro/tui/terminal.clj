@@ -206,7 +206,7 @@
       (let [[ev _] (decode-key [c])]
         ev))))
 
-(deftype JLineTerminal [^org.jline.terminal.Terminal term resize-handler]
+(deftype JLineTerminal [^org.jline.terminal.Terminal term resize-handler closed?]
   Terminal
   (t-size [_]
     {:rows (.getHeight term) :cols (.getWidth term)})
@@ -225,28 +225,42 @@
     (t-write! this ansi-cursor-hide)
     (t-flush! this))
   (t-leave! [this]
-    (t-write! this ansi-cursor-show)
-    (t-write! this ansi-alt-screen-leave)
-    (t-flush! this)
-    (.close term))
+    ;; Idempotent: `quit!` and the input loop's `finally` both call `t-leave!`, and on Ctrl-Q they
+    ;; race on the same terminal. The first call restores the screen and closes the JLine terminal;
+    ;; a second call must NOT touch it (writing to a closed terminal throws
+    ;; `IllegalStateException: Terminal has been closed`). The CAS ensures only the first runs.
+    (when (compare-and-set! closed? false true)
+      (t-write! this ansi-cursor-show)
+      (t-write! this ansi-alt-screen-leave)
+      (t-flush! this)
+      (.close term)))
   (t-sync-supported? [_]
     ;; best-effort: this JLine/terminfo build has no Sync capability enum, so report false.
     false)
   (t-on-resize! [_ handler]
     (reset! resize-handler handler)
-    ;; Route JLine's WINCH signal to the registered handler. JLine delivers this on its own signal
-    ;; thread, so the handler must be safe to call concurrently with the input loop.
-    (.handle term org.jline.terminal.Terminal$Signal/WINCH
-             (reify org.jline.terminal.Terminal$SignalHandler
-               (handle [_ _sig]
-                 (when-let [h @resize-handler] (h)))))
+    ;; Deliver terminal-resize (SIGWINCH) to the registered handler. We use `sun.misc.Signal`
+    ;; instead of JLine's `(.handle term Terminal$Signal/WINCH ...)` because JLine's signal enum
+    ;; and `SignalHandler` are INNER classes that babashka's SCI can neither resolve symbolically
+    ;; nor `reify`. `sun.misc.Signal`/`SignalHandler` are top-level, so the SAME code runs on the
+    ;; JVM and under bb. Installing here (after the terminal is built) also overrides the WINCH
+    ;; handler JLine installs for itself. JLine/the OS deliver this on a separate signal thread, so
+    ;; the handler must be safe to call concurrently with the input loop. Wrapped in try/catch:
+    ;; WINCH is absent on some platforms (e.g. Windows), where resize signals are simply ignored.
+    (try
+      (sun.misc.Signal/handle
+       (sun.misc.Signal. "WINCH")
+       (reify sun.misc.SignalHandler
+         (handle [_ _sig]
+           (when-let [h @resize-handler] (h)))))
+      (catch Throwable _ nil))
     nil))
 
 (defn jline-terminal
   "Returns a `Terminal` backed by a system JLine terminal (`TerminalBuilder`)."
   []
   (let [term (.. (TerminalBuilder/builder) (system true) (build))]
-    (->JLineTerminal term (atom nil))))
+    (->JLineTerminal term (atom nil) (atom false))))
 
 ;; =============================================================================
 ;; Fake terminal (string-terminal)

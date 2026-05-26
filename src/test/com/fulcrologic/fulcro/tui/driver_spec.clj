@@ -81,9 +81,9 @@
 
 ;; ---------------------------------------------------------------------------
 
-(specification {:covers {`driver/application      "598adf,26ebe5"
-                         `driver/attach!          "8595fd,59a8e3"
-                         `driver/render!          "90d81f,ca0967"
+(specification {:covers {`driver/application      "598adf,cedfc3"
+                         `driver/attach!          "8595fd,c2dda5"
+                         `driver/render!          "90d81f,c453ec"
                          `driver/screen-of        "f2651c,662c58"
                          `driver/screen-styled-of "bac68a,5083b1"
                          `driver/terminal         "18f70c,089ec1"}} "application / attach! (initial paint)"
@@ -109,7 +109,7 @@
                     "the hardware cursor is shown at input :a's caret origin (0,0)"
                     (term/cursor t) => {:x 0 :y 0 :visible? true}))))
 
-(specification {:covers {`driver/step! "32154f,debac7"}} "step! — focus, typing, and activation"
+(specification {:covers {`driver/step! "32154f,041d52"}} "step! — focus, typing, and activation"
                (component "Tab moves focus and follows the cursor to the newly focused input"
                           (let [app (new-app)
                                 t   (term/string-terminal {:rows 10 :cols 30})]
@@ -153,7 +153,7 @@
                              "the repaint shows the button's updated label"
                              (nth (driver/screen-of app) 2) => "DONE                          "))))
 
-(specification {:covers {`driver/render!          "90d81f,ca0967"
+(specification {:covers {`driver/render!          "90d81f,c453ec"
                          `driver/too-small-buffer "81d757,220fc4"}} "render! — diff path & resize"
                (component "a no-op re-render produces no terminal output"
                           (let [app (new-app)
@@ -195,7 +195,7 @@
                                (str/includes? (first scr) "too small") => true
                                (str/includes? (first scr) "10x5") => true)))))
 
-(specification {:covers {`driver/step! "32154f,debac7"
+(specification {:covers {`driver/step! "32154f,041d52"
                          `driver/follow-focus! "a7ce94,259142"}} "viewport scrolling, follow-focus, and cursor tracking"
                (component "Tab into the list auto-scrolls the viewport so the focused item stays visible"
                           (let [app (new-vp-app)
@@ -324,8 +324,8 @@
                              "scrolling back up reveals the first wrapped row again"
                              (first (driver/screen-of app)) => "the quick   "))))
 
-(specification {:covers {`driver/mount! "fb742f,514eaa"
-                         `driver/run-blocking! "a8159d,bb2148"
+(specification {:covers {`driver/mount! "fb742f,51525a"
+                         `driver/run-blocking! "a8159d,95073d"
                          `driver/quit!  "acaa83,a354d9"}} "mount! / run! — input loop"
                (component "run! with a finite key script processes the keys and ends, leaving the terminal"
                           (let [app (new-app)
@@ -398,8 +398,8 @@
 (defn- new-picker-app []
   (driver/application {:root-class PickerRoot :initial-state true}))
 
-(specification {:covers {`driver/render! "90d81f,ca0967"
-                         `driver/step!   "32154f,debac7"}} "overlay compositing & focus trap"
+(specification {:covers {`driver/render! "90d81f,c453ec"
+                         `driver/step!   "32154f,041d52"}} "overlay compositing & focus trap"
                (component "while the picker is closed only the base UI is focusable and painted"
                           (let [app (new-picker-app)
                                 t   (term/string-terminal {:rows 10 :cols 24})]
@@ -450,7 +450,7 @@
                                "the base UI paints un-obscured again (no modal border on screen)"
                                (str/includes? (apply str scr) "Fruit") => false)))))
 
-(specification {:covers {`driver/step!         "32154f,debac7"
+(specification {:covers {`driver/step!         "32154f,041d52"
                          `driver/follow-focus! "a7ce94,259142"}} "picker scrolling and selection"
                (component "arrowing down past the visible rows auto-scrolls the picker's viewport"
                           (let [app (new-picker-app)

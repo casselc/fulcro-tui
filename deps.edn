@@ -1,12 +1,37 @@
 {:paths   ["src/main"]
 
- :deps    {com.fulcrologic/fulcro {:local/root "../fulcro"}
+ :deps    {com.fulcrologic/fulcro {:mvn/version "3.10.0-RC1"}
            org.jline/jline       {:mvn/version "3.27.1"}}
 
- :aliases {:test {:extra-paths ["src/test"]
-                  :extra-deps  {fulcrologic/fulcro-spec   {:mvn/version "3.2.8"
-                                                           :exclusions  [com.fulcrologic/fulcro]}
-                                org.clojure/test.check    {:mvn/version "1.1.1"}}}
+ :aliases {:test        {:extra-paths ["src/test"]
+                         :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.8"
+                                                                :exclusions  [com.fulcrologic/fulcro]}
+                                       org.clojure/test.check  {:mvn/version "1.1.1"}}}
 
-           :tui  {:extra-paths ["src/tui-example"]
-                  :main-opts   ["-m" "tui-example.form"]}}}
+           ;; Headless test runner. Combine with :test, e.g. `clojure -M:test:test-runner`.
+           ;; Runs every `*-spec` namespace under src/test with guardrails throwing on
+           ;; schema violations, and exits non-zero on any failure (suitable for CI).
+           :test-runner {:extra-deps {io.github.cognitect-labs/test-runner
+                                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+                         :jvm-opts   ["-Dguardrails.enabled=true"
+                                      "-Dguardrails.config=guardrails-test.edn"]
+                         :main-opts  ["-m" "cognitect.test-runner"
+                                      "-d" "src/test" "-r" ".*-spec$"]}
+
+           ;; Kaocha runner with dot-based output (see tests.edn). Combine with :test,
+           ;; e.g. `clojure -M:test:kaocha`. Same guardrails-throwing opts as :test-runner.
+           :kaocha      {:extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}}
+                         :jvm-opts   ["-Dguardrails.enabled=true"
+                                      "-Dguardrails.config=guardrails-test.edn"]
+                         :main-opts  ["-m" "kaocha.runner"]}
+
+           ;; tools.build entry point. Functions live in build.clj at the repo root.
+           ;;   clojure -T:build jar      ; build target/fulcro-tui-<version>.jar + pom
+           ;;   clojure -T:build install  ; install that jar into ~/.m2
+           ;;   clojure -T:build deploy   ; push to Clojars (creds from ~/.m2/settings.xml)
+           :build       {:deps       {io.github.clojure/tools.build {:mvn/version "0.10.5"}
+                                      slipset/deps-deploy           {:mvn/version "0.2.2"}}
+                         :ns-default build}
+
+           :tui         {:extra-paths ["src/tui-example"]
+                         :main-opts   ["-m" "tui-example.form"]}}}

@@ -1,12 +1,14 @@
 = fulcro-tui
 
+image:https://github.com/fulcrologic/fulcro-tui/actions/workflows/test.yml/badge.svg["CI", link="https://github.com/fulcrologic/fulcro-tui/actions/workflows/test.yml"]
+
 A terminal (TUI) rendering target for https://github.com/fulcrologic/fulcro[Fulcro], backed by https://github.com/jline/jline3[JLine].
 
 Fulcro normally renders through React to the browser DOM. This library provides an alternative rendering target: it lays out a tree of terminal-native nodes (boxes, text, inputs, buttons) and paints them into a character-cell buffer that is displayed in a real terminal via JLine. Components are written with the familiar `tui/defsc` macro and driven by the same Fulcro data-management primitives (mutations, normalized state, transactions).
 
 == Status
 
-Works on the JVM. Babashka execution is *not yet possible* — see the comment block in `bb.edn` for the two blockers (Fulcro's `Mutation` `deftype` cannot be created by bb's SCI, and transitively pulled `spec.alpha`/`clojurescript` jars shadow bb's built-ins). Both must be resolved in Fulcro core before bb support can land.
+Works on the JVM *and* under https://babashka.org[babashka]. The historical bb blockers (Fulcro's `Mutation` `deftype` not being constructable by bb's SCI, and transitively-pulled `spec.alpha`/`clojurescript` jars shadowing bb's built-ins) are resolved in the Fulcro build this depends on; JLine's inner-class resize-signal API is routed through `sun.misc.Signal` so it works on both runtimes. Run the demo under babashka with `bb run tui` — see `bb.edn` for details.
 
 == Adding as a dependency
 
@@ -28,11 +30,18 @@ Git dependency (`deps.edn`):
 
 == Try the demo
 
-Run the example two-field form in a real terminal:
+Run the example two-field form in a real terminal, on the JVM:
 
 [source,bash]
 ----
 clojure -M:tui -m tui-example.form
+----
+
+…or under babashka (faster startup, no JVM):
+
+[source,bash]
+----
+bb run tui
 ----
 
 Controls:

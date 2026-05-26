@@ -1,24 +1,28 @@
 ;; ===========================================================================
-;; SCAFFOLDING ONLY — babashka execution does NOT work yet.
+;; Babashka target for fulcro-tui.
 ;;
-;; This bb.edn documents the eventual babashka target for fulcro-tui, but the
-;; TUI does not run under babashka today. Two blockers must be resolved in
-;; Fulcro CORE first:
+;; The TUI now loads and runs under babashka. The two historical blockers were
+;; both in Fulcro CORE and are resolved as of the Fulcro build this depends on
+;; (the one that publishes `…algorithms.macro-support`):
 ;;
-;;   1. Fulcro's `Mutation` is a `deftype` that implements
-;;      `clojure.lang.IFn`. Babashka's SCI interpreter cannot create a type
-;;      that implements IFn, so `defmutation` / mutation invocation fails to
-;;      load.
+;;   1. Fulcro's `Mutation` `deftype` implements `clojure.lang.IFn`, which bb's
+;;      SCI could not construct — `defmutation` now loads and runs.
+;;   2. The transitively-pulled `org.clojure/spec.alpha` and
+;;      `org.clojure/clojurescript` jars no longer shadow bb's built-ins.
 ;;
-;;   2. The `org.clojure/spec.alpha` and `org.clojure/clojurescript` jars
-;;      pulled in transitively by Fulcro shadow babashka's built-in versions
-;;      of those namespaces, breaking the bb runtime.
+;; A third, bb-specific blocker lived here in the TUI: JLine's resize signal API
+;; (`Terminal$Signal`/`Terminal$SignalHandler`) uses INNER classes that SCI can
+;; neither resolve nor `reify`. terminal.cljc now routes SIGWINCH through the
+;; top-level `sun.misc.Signal`/`SignalHandler` instead, which works on both the
+;; JVM and bb.
 ;;
-;; Until both are fixed upstream, do NOT add bb tasks that pretend to run the
-;; TUI. Run the demo on the JVM instead:  clojure -M:tui -m tui-example.form
+;; Run the demo in a real terminal with:  bb run tui   (or: bb tui)
 ;;
 ;; Note: babashka bundles JLine, so there is intentionally no org.jline/jline
 ;; dependency here (unlike deps.edn, which needs it on the JVM).
 ;; ===========================================================================
 {:paths ["src/main" "src/tui-example"]
- :deps  {com.fulcrologic/fulcro {:local/root "../fulcro"}}}
+ :deps  {com.fulcrologic/fulcro {:mvn/version "3.10.0-RC1"}}
+ :tasks {tui {:doc      "Run the example TUI form in the current terminal (Ctrl-Q quits)."
+              :requires ([tui-example.form])
+              :task     (tui-example.form/-main)}}}
