@@ -5,11 +5,22 @@ image:https://github.com/fulcrologic/fulcro-tui/actions/workflows/test.yml/badge
 
 A terminal (TUI) rendering target for https://github.com/fulcrologic/fulcro[Fulcro], backed by https://github.com/jline/jline3[JLine].
 
-Fulcro normally renders through React to the browser DOM. This library provides an alternative rendering target: it lays out a tree of terminal-native nodes (boxes, text, inputs, buttons) and paints them into a character-cell buffer that is displayed in a real terminal via JLine. Components are written with the familiar `tui/defsc` macro and driven by the same Fulcro data-management primitives (mutations, normalized state, transactions).
+Fulcro has always been full-stack CLJC in all ways (rendering and server processing alike). To date the server support for "rendering" has largely been useful for headless testing, but all the machinery for more was always present.
+
+This library (finally& provides an alternative rendering target: The terminal!
+
+it lays out a tree of terminal-native nodes (boxes, text, inputs, buttons) and paints them into a character-cell buffer that is displayed in a real terminal via JLine. Components are written with the familiar `tui/defsc` macro and driven by the same Fulcro data-management primitives (mutations, normalized state, transactions).
+
+The result is a Fulcro/React-like experience with a terminal UI.
+
+Babashka support made possible by the inclusion of JLine!
 
 == Status
 
-Works on the JVM *and* under https://babashka.org[babashka]. The historical bb blockers (Fulcro's `Mutation` `deftype` not being constructable by bb's SCI, and transitively-pulled `spec.alpha`/`clojurescript` jars shadowing bb's built-ins) are resolved in the Fulcro build this depends on; JLine's inner-class resize-signal API is routed through `sun.misc.Signal` so it works on both runtimes. Run the demo under babashka with `bb run tui` — see `bb.edn` for details.
+Clone the report and run the demo under babashka with `bb run tui` — see `bb.edn` for details.
+
+NOT API stable while in alpha, but expect any changes to be pretty minor. All of the UI stuff is pretty solid, and
+the Fulcro patterns have been stable for years.
 
 == Adding as a dependency
 
@@ -82,3 +93,5 @@ cancels):
              :on-select (fn [v] (tui/transact! this [(choose-fruit {:v v})]))
              :on-cancel (fn []  (tui/transact! this [(close-picker)]))})
 ----
+
+See the demo source in this repository for more examples.
