@@ -43,4 +43,41 @@ Controls:
 * In the multiline notes box, *Enter* inserts a newline (it does not submit); the box wraps to its width and self-scrolls to keep the caret visible.
 * *Enter* / *Space* activates the focused Save button or list item.
 * *PageUp* / *PageDown* scroll the item list; tabbing into the list auto-scrolls to keep the focused item visible.
+* *Pick a fruit* opens a modal list picker (see below): *Up* / *Down* move the highlight, *Enter* chooses, *Escape* cancels.
 * *Ctrl-Q* quits.
+
+== Overlays: modal and picker
+
+A `tui/modal` node is an overlay window that floats over the rest of the UI. The driver composites it
+on top of the base tree and *traps focus and keyboard input* to it while it is open, so the controls
+behind it are inert. It is declarative — its presence is just app state, via an `:open?` flag:
+
+[source,clojure]
+----
+(tui/modal {:id :confirm :open? confirm-open?
+            :width 30 :height 7 :title "Confirm"
+            :on-dismiss #(tui/transact! this [(close-confirm)])} ; Escape calls this
+  (tui/text {} "Delete everything?")
+  (tui/button {:id :yes :on-activate #(tui/transact! this [(do-delete)])} " Yes "))
+----
+
+The library owns no lifecycle: *you* toggle `:open?` (and record any result) with your own mutations,
+exactly as the rest of a Fulcro app works. `:width`/`:height` accept a cell count or `[:fraction f]`;
+`:align` (default `:center`) positions the window; `:border?` defaults to `true`; `:on-dismiss` is
+called on *Escape*.
+
+`tui/picker` is a list picker built on `modal` — a scrollable `:viewport` of selectable rows where the
+focused row *is* the highlight (Up/Down move it, the list scrolls to follow, Enter selects, Escape
+cancels):
+
+[source,clojure]
+----
+(tui/picker {:id        :fruit
+             :open?     picker-open?
+             :title     "Pick a fruit"
+             :width     24 :height 8
+             :options   [{:value :apple :label "Apple"}
+                         {:value :pear  :label "Pear"}]
+             :on-select (fn [v] (tui/transact! this [(choose-fruit {:v v})]))
+             :on-cancel (fn []  (tui/transact! this [(close-picker)]))})
+----
