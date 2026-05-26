@@ -17,23 +17,7 @@ Released to https://clojars.org/com.fulcrologic/fulcro-tui[Clojars] — use the 
 
 [source,clojure]
 ----
-{:deps {com.fulcrologic/fulcro-tui {:mvn/version "1.0.0-alpha1-SNAPSHOT"}}}
-----
-
-Local checkout (`deps.edn`):
-
-[source,clojure]
-----
-{:deps {com.fulcrologic/fulcro-tui {:local/root "../fulcro-tui"}}}
-----
-
-Git dependency (`deps.edn`):
-
-[source,clojure]
-----
-{:deps {com.fulcrologic/fulcro-tui
-        {:git/url "https://github.com/fulcrologic/fulcro-tui.git"
-         :git/sha "<sha>"}}}
+{:deps {com.fulcrologic/fulcro-tui {:mvn/version "RELEASE"}}}
 ----
 
 == Try the demo
