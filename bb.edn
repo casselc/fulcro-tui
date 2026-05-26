@@ -1,0 +1,24 @@
+;; ===========================================================================
+;; SCAFFOLDING ONLY — babashka execution does NOT work yet.
+;;
+;; This bb.edn documents the eventual babashka target for fulcro-tui, but the
+;; TUI does not run under babashka today. Two blockers must be resolved in
+;; Fulcro CORE first:
+;;
+;;   1. Fulcro's `Mutation` is a `deftype` that implements
+;;      `clojure.lang.IFn`. Babashka's SCI interpreter cannot create a type
+;;      that implements IFn, so `defmutation` / mutation invocation fails to
+;;      load.
+;;
+;;   2. The `org.clojure/spec.alpha` and `org.clojure/clojurescript` jars
+;;      pulled in transitively by Fulcro shadow babashka's built-in versions
+;;      of those namespaces, breaking the bb runtime.
+;;
+;; Until both are fixed upstream, do NOT add bb tasks that pretend to run the
+;; TUI. Run the demo on the JVM instead:  clojure -M:tui -m tui-example.form
+;;
+;; Note: babashka bundles JLine, so there is intentionally no org.jline/jline
+;; dependency here (unlike deps.edn, which needs it on the JVM).
+;; ===========================================================================
+{:paths ["src/main" "src/tui-example"]
+ :deps  {com.fulcrologic/fulcro {:local/root "../fulcro"}}}

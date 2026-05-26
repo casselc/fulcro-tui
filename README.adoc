@@ -1,0 +1,46 @@
+= fulcro-tui
+
+A terminal (TUI) rendering target for https://github.com/fulcrologic/fulcro[Fulcro], backed by https://github.com/jline/jline3[JLine].
+
+Fulcro normally renders through React to the browser DOM. This library provides an alternative rendering target: it lays out a tree of terminal-native nodes (boxes, text, inputs, buttons) and paints them into a character-cell buffer that is displayed in a real terminal via JLine. Components are written with the familiar `tui/defsc` macro and driven by the same Fulcro data-management primitives (mutations, normalized state, transactions).
+
+== Status
+
+Works on the JVM. Babashka execution is *not yet possible* — see the comment block in `bb.edn` for the two blockers (Fulcro's `Mutation` `deftype` cannot be created by bb's SCI, and transitively pulled `spec.alpha`/`clojurescript` jars shadow bb's built-ins). Both must be resolved in Fulcro core before bb support can land.
+
+== Adding as a dependency
+
+Local checkout (`deps.edn`):
+
+[source,clojure]
+----
+{:deps {com.fulcrologic/fulcro-tui {:local/root "../fulcro-tui"}}}
+----
+
+Git dependency (`deps.edn`):
+
+[source,clojure]
+----
+{:deps {com.fulcrologic/fulcro-tui
+        {:git/url "https://github.com/fulcrologic/fulcro-tui.git"
+         :git/sha "<sha>"}}}
+----
+
+== Try the demo
+
+Run the example two-field form in a real terminal:
+
+[source,bash]
+----
+clojure -M:tui -m tui-example.form
+----
+
+Controls:
+
+* *Tab* / *Shift-Tab* move focus through the fields, the multiline notes box, the Save button, and into the item list.
+* *Arrow keys* move the caret (in the notes box, Up/Down move by visual line).
+* Type to edit the focused field.
+* In the multiline notes box, *Enter* inserts a newline (it does not submit); the box wraps to its width and self-scrolls to keep the caret visible.
+* *Enter* / *Space* activates the focused Save button or list item.
+* *PageUp* / *PageDown* scroll the item list; tabbing into the list auto-scrolls to keep the focused item visible.
+* *Ctrl-Q* quits.

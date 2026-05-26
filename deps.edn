@@ -1,0 +1,12 @@
+{:paths   ["src/main"]
+
+ :deps    {com.fulcrologic/fulcro {:local/root "../fulcro"}
+           org.jline/jline       {:mvn/version "3.27.1"}}
+
+ :aliases {:test {:extra-paths ["src/test"]
+                  :extra-deps  {fulcrologic/fulcro-spec   {:mvn/version "3.2.8"
+                                                           :exclusions  [com.fulcrologic/fulcro]}
+                                org.clojure/test.check    {:mvn/version "1.1.1"}}}
+
+           :tui  {:extra-paths ["src/tui-example"]
+                  :main-opts   ["-m" "tui-example.form"]}}}

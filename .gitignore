@@ -1,0 +1,9 @@
+/target
+.cpcache
+/.cpcache
+.nrepl-port
+/.clj-kondo/.cache
+.lsp
+*.jar
+.DS_Store
+Thumbs.db
