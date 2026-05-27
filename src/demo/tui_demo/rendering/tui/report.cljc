@@ -1,0 +1,100 @@
+(ns tui-demo.rendering.tui.report
+  "TUI report renderers for the RAD statechart engine.
+
+   * `render-table-report-layout` `(fn [report-instance])` - the whole report: the control bar, a
+     header `hbox` of column labels, then a `viewport` of row `hbox`es (via `report/render-row`).
+   * `render-table-row` `(fn [report-instance row-class row-props])` - one selectable row. Each row
+     is a `button` whose activation either follows a form-link (`form/edit!`) or selects the row
+     (`report/select-row!`).
+   * `render-standard-controls` `(fn [report-instance])` - the control bar: action buttons and input
+     controls, rendered via `control/render-control`."
+  (:require
+    [clojure.string :as str]
+    [com.fulcrologic.fulcro.components :as comp]
+    [com.fulcrologic.fulcro.tui.elements :as e :refer [vbox hbox text button line viewport]]
+    [com.fulcrologic.rad.attributes :as attr]
+    [com.fulcrologic.rad.attributes-options :as ao]
+    [com.fulcrologic.rad.control :as control]
+    [com.fulcrologic.rad.options-util :refer [?!]]
+    [com.fulcrologic.rad.report :as-alias report]
+    [com.fulcrologic.rad.statechart.form :as form]
+    [com.fulcrologic.rad.statechart.report :as screport]))
+
+(def ^:private col-width
+  "Display width (in cells) of each report column."
+  18)
+
+(defn- column-label
+  "Returns the heading label for report `column` on `report-instance`."
+  [report-instance {::report/keys [column-heading] ::attr/keys [qualified-key] :as column}]
+  (or (?! column-heading report-instance)
+    (?! (ao/label column) report-instance)
+    (some-> qualified-key name str/capitalize)
+    ""))
+
+(defn render-table-row
+  "Renders one report row as a focusable hbox of column cells. Activating the row (Enter/Space) opens
+   its edit form — a `ro/form-links` entry on ANY column — or, failing that, runs the report's first
+   `ro/row-action`. Terminals have no separate row-selection concept, so focus IS the highlight."
+  [report-instance _row-class row-props]
+  (let [{::report/keys [columns row-actions]} (comp/component-options report-instance)
+        {::report/keys [idx]} (comp/get-computed row-props)
+        link       (some (fn [c] (screport/form-link report-instance row-props (::attr/qualified-key c)))
+                     columns)
+        row-id     (keyword "row" (str idx))
+        cells      (mapv (fn [column]
+                           (text {:width col-width}
+                             (str (screport/formatted-column-value report-instance row-props column))))
+                     columns)
+        activate   (fn []
+                     (cond
+                       link              (form/edit! report-instance (:edit-form link) (:entity-id link))
+                       (seq row-actions) ((:action (first row-actions)) report-instance row-props)))]
+    ;; A focusable hbox (NOT a button): an `:id` + `:on-activate` makes any node focusable and
+    ;; Enter/Space-activatable, and an hbox lays out the column cells. A `button` is a text leaf
+    ;; and would stringify the cell layout.
+    (hbox {:id          row-id
+           :highlight   (e/focused? row-id)
+           :on-activate activate}
+      cells)))
+
+(defn render-standard-controls
+  "Renders the report control bar: a row of action buttons followed by the input control rows, each
+   rendered via `control/render-control`."
+  [report-instance]
+  (let [{:keys [action-layout input-layout]} (control/standard-control-layout report-instance)]
+    (vbox {}
+      (when (seq action-layout)
+        (hbox {:height 1}
+          (mapv (fn [k] (control/render-control report-instance k)) action-layout)))
+      (mapv (fn [row]
+              (vbox {}
+                (mapv (fn [k] (control/render-control report-instance k)) row)))
+        input-layout))))
+
+(defn render-table-report-layout
+  "Renders the whole table report: the control bar, a column header row, and a scrolling viewport of
+   data rows (each via `report/render-row`)."
+  [report-instance]
+  (let [{::report/keys [columns]} (comp/component-options report-instance)
+        render-controls (screport/control-renderer report-instance)
+        rows            (screport/current-rows report-instance)]
+    (vbox {:border? true :color :cyan :padding 1}
+      (when render-controls
+        (render-controls report-instance))
+      (line {})
+      (hbox {:height 1}
+        (mapv (fn [c] (text {:width col-width :bold true :color :bright-cyan}
+                        (column-label report-instance c)))
+          columns))
+      (line {})
+      (viewport {:id :report-rows :height 10 :border? true :color :bright-black}
+        (vbox {}
+          (if (seq rows)
+            (map-indexed
+              (fn [idx row]
+                (screport/render-row report-instance nil
+                  (comp/computed row {::report/idx idx
+                                      :highlighted? (= idx (screport/currently-selected-row report-instance))})))
+              rows)
+            (text {:color :bright-black} "No rows.")))))))

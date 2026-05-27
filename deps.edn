@@ -28,6 +28,41 @@
            :tui         {:extra-paths ["src/tui-example"]
                          :main-opts   ["-m" "tui-example.form"]}
 
+           ;; ─── Full-stack RAD/statechart demo (see src/demo) ─────────────────────────
+           ;; All published mvn versions, all carrying the babashka-compat fixes:
+           ;; fulcro 3.10.0-RC2 (the `->arity-tolerant` SCI fix), statecharts 1.4.0-RC18
+           ;; (promise shim + encore→algorithms.core), fulcro-rad 1.6.24 (cljs-analyzer :bb guards),
+           ;; fulcro-rad-statecharts 0.1.5. fulcro-rad-statecharts transitively pins an older
+           ;; statecharts, so we exclude it and declare statecharts explicitly.
+
+           ;; JVM-only server: datascript + Pathom v2 behind a standard Fulcro transit /api.
+           :demo-server {:extra-paths ["src/demo"]
+                         :extra-deps  {com.fulcrologic/fulcro-rad-statecharts {:mvn/version "0.1.5"
+                                                                               :exclusions [com.fulcrologic/statecharts]}
+                                       com.fulcrologic/fulcro                 {:mvn/version "3.10.0-RC2"}
+                                       com.fulcrologic/statecharts            {:mvn/version "1.4.0-RC18"}
+                                       com.fulcrologic/fulcro-rad             {:mvn/version "1.6.24"}
+                                       datascript/datascript                  {:mvn/version "1.7.4"}
+                                       com.wsscode/pathom                     {:mvn/version "2.4.0"}
+                                       http-kit/http-kit                      {:mvn/version "2.8.1"}
+                                       ring/ring-core                         {:mvn/version "1.15.3"}}
+                         :main-opts   ["-m" "tui-demo.server.main"]}
+
+           ;; TUI client (also runnable under babashka via `bb run demo`). NO datascript here.
+           ;; clojurescript / spec.alpha excluded: the client is pure clj/bb, and those jars clash
+           ;; with babashka's SCI internals (same reason the bb test task excludes them).
+           :demo        {:extra-paths ["src/demo"]
+                         :extra-deps  {com.fulcrologic/fulcro-rad-statecharts
+                                       {:mvn/version "0.1.5"
+                                        :exclusions [org.clojure/clojurescript
+                                                     org.clojure/spec.alpha
+                                                     com.fulcrologic/statecharts]}
+                                       com.fulcrologic/statecharts {:mvn/version "1.4.0-RC18"}
+                                       com.fulcrologic/fulcro-rad  {:mvn/version "1.6.24"}
+                                       com.fulcrologic/fulcro      {:mvn/version "3.10.0-RC2"}
+                                       org.babashka/http-client    {:mvn/version "0.4.22"}}
+                         :main-opts   ["-m" "tui-demo.client.main"]}
+
            ;; DEBUG ONLY (JVM, not babashka): turns on the Fulcro Inspect shim via
            ;; -Dtui.inspect=true. The shim (`com.fulcrologic.fulcro.tui.inspect`) now lives in
            ;; src/main (always on the classpath, loaded on demand), so this alias only sets the

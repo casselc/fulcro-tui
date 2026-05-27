@@ -22,10 +22,30 @@
 ;; dependency here (unlike deps.edn, which needs it on the JVM).
 ;; ===========================================================================
 {:paths ["src/main" "src/tui-example"]
- :deps  {com.fulcrologic/fulcro {:mvn/version "3.10.0-RC1"}}
+ :deps  {com.fulcrologic/fulcro {:mvn/version "3.10.0-RC2"}}
  :tasks {tui  {:doc      "Run the example TUI form in the current terminal (Ctrl-Q quits)."
                :requires ([tui-example.form])
                :task     (tui-example.form/-main)}
+
+         ;; ---------------------------------------------------------------------
+         ;; Full-stack RAD + statechart demo CLIENT (see src/demo). Talks transit HTTP to the
+         ;; JVM demo server, which you must start first:  clojure -M:demo-server   (port 3001).
+         ;; All published mvn versions (each carries the babashka-compat fixes). fulcro comes from
+         ;; the top-level :deps (3.10.0-RC2). clojurescript/spec.alpha are excluded (pure clj/bb
+         ;; client; they clash with SCI); statecharts is excluded from rad-statecharts so the
+         ;; explicit RC18 wins.
+         ;; ---------------------------------------------------------------------
+         demo {:doc         "Run the full-stack RAD/statechart demo client (needs `clojure -M:demo-server` on :3001)."
+               :extra-paths ["src/demo"]
+               :extra-deps  {com.fulcrologic/statecharts            {:mvn/version "1.4.0-RC18"}
+                             com.fulcrologic/fulcro-rad             {:mvn/version "1.6.24"}
+                             com.fulcrologic/fulcro-rad-statecharts {:mvn/version "0.1.5"
+                                                                     :exclusions [org.clojure/clojurescript
+                                                                                  org.clojure/spec.alpha
+                                                                                  com.fulcrologic/statecharts]}
+                             org.babashka/http-client               {:mvn/version "0.4.22"}}
+               :requires    ([tui-demo.client.main])
+               :task        (tui-demo.client.main/-main)}
 
          ;; ---------------------------------------------------------------------
          ;; Babashka test runner.
