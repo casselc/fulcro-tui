@@ -1,0 +1,948 @@
+= Fulcro TUI Guide
+:author: Tony Kay
+:lang: en
+:encoding: UTF-8
+:doctype: book
+:source-highlighter: coderay
+:source-language: clojure
+:toc: left
+:toclevels: 3
+:sectlinks:
+:sectanchors:
+:leveloffset: 1
+:sectnums:
+:imagesdir: images
+:scriptsdir: js
+:imagesoutdir: generated/images
+
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+ifdef::env-github[]
+toc::[]
+endif::[]
+
+= Getting Started
+
+Fulcro normally renders through React into the browser DOM. `fulcro-tui` is an
+*alternative rendering target*: instead of DOM, your components produce a tree of
+terminal-native nodes (boxes, text, inputs, buttons), which the library lays out
+and paints into a character-cell buffer displayed in a real terminal via
+https://github.com/jline/jline3[JLine].
+
+The payoff: you write ordinary Fulcro components with the stock `defsc` macro, use
+the same data-management primitives (normalized state, mutations, transactions),
+and get a React-like terminal UI. Because the whole pipeline is plain Clojure (no
+React, no DOM, no ClojureScript), it runs on the JVM and under
+https://babashka.org/[babashka].
+
+NOTE: This library is *alpha* — not yet API-stable — but the UI machinery is solid
+and the Fulcro patterns it builds on have been stable for years. Expect any changes
+to be minor.
+
+== What you need
+
+Add the dependency (use the latest version from the badge on the project README):
+
+[source,clojure]
+-----
+{:deps {com.fulcrologic/fulcro-tui {:mvn/version "RELEASE"}}}
+-----
+
+This transitively brings in `com.fulcrologic/fulcro` and `org.jline/jline`. No
+ClojureScript toolchain is required — everything here is `.clj`.
+
+== The namespaces and their aliases
+
+The library is organized into a handful of namespaces. This guide uses the same
+aliases the real source and tests use:
+
+[cols="2,1,3"]
+|===
+| Namespace | Alias | What's in it
+
+| `com.fulcrologic.fulcro.tui.elements`    | `elements` | Element generators (`vbox`, `text`, …), `focused?`, `transact!`.
+| `com.fulcrologic.fulcro.tui.engine`      | `engine`   | Node model, render pipeline, layout/paint, focus & scroll state.
+| `com.fulcrologic.fulcro.tui.application` | `app`      | The application lifecycle and terminal driver.
+| `com.fulcrologic.fulcro.tui.terminal`    | `term`     | The `Terminal` abstraction and key-event model.
+| `com.fulcrologic.fulcro.tui.inspect`     | `tui-inspect` | Debug-only Fulcro Inspect connector.
+|===
+
+== The shape of a TUI app
+
+Every `fulcro-tui` program has the same three moving parts:
+
+. A *root component* — a normal `com.fulcrologic.fulcro.components/defsc` whose
+  `:render` returns a tree of TUI *nodes* (built with the element generators
+  `vbox`, `hbox`, `text`, `input`, `button`, …) instead of DOM.
+. A *Fulcro application* — built with `app/application`, which wires a synchronous
+  Fulcro app whose every state change repaints the terminal.
+. An *input loop* — `app/mount!` / `app/run-blocking!` attaches a terminal and runs
+  the keyboard loop; `app/quit!` stops it.
+
+In code:
+
+[source,clojure]
+-----
+(ns my.tui
+  (:require
+    [com.fulcrologic.fulcro.components :as comp]
+    [com.fulcrologic.fulcro.tui.elements :as elements]
+    [com.fulcrologic.fulcro.tui.application :as app]))
+
+(comp/defsc Root [this {:keys [greeting]}]
+  {:query         [:greeting]
+   :initial-state {:greeting "Hello, terminal!"}}     ; <1>
+  (elements/vbox {:padding 1 :border? true}
+    (elements/text {:bold true :color :cyan} (or greeting ""))
+    (elements/text {:color :bright-black} "Press Ctrl-Q to quit.")))
+
+(defn -main [& _]
+  (app/start! {:root-class Root}                                  ; <2>
+              {:global-keymap {[:ctrl "q"] (fn [a _e] (app/quit! a))}})) ; <3>
+-----
+<1> Declare the root's starting data with `:initial-state` (the idiomatic Fulcro
+    way — it composes down through child components and survives refactoring).
+<2> `app/start!` is the one-call entrypoint: it builds the app *and* runs it to
+    completion. It seeds the db from the root class's `:initial-state` *by default*
+    — no extra option needed. (Opt out with `:initial-state false`.)
+<3> The second (optional) map is run options — here a global keymap that wires
+    *Ctrl-Q* to quit. See <<_the_application_lifecycle,The Application Lifecycle>>
+    for the lower-level `application` → `run-blocking!` two-step.
+
+== Run the demo
+
+The repository ships a complete, runnable demo at
+`src/tui-example/tui_example/form.clj`: a two-field form with a multiline notes
+area, a Save button, a scrolling list, a confirmation modal, and a fruit picker.
+Run it in a real terminal on the JVM:
+
+[source,bash]
+-----
+clojure -M:tui -m tui-example.form
+-----
+
+…or under babashka (faster startup, no JVM):
+
+[source,bash]
+-----
+bb run tui
+-----
+
+Controls: *Tab* / *Shift-Tab* move focus, type to edit the focused field, *Enter* /
+*Space* activates a button or list item, *PageUp* / *PageDown* scroll the list, and
+*Ctrl-Q* quits.
+
+The full demo source is the best reference for "real" usage and is referenced
+throughout this guide:
+
+[source,clojure]
+-----
+include::src/tui-example/tui_example/form.clj[]
+-----
+
+= The Node Model & Element Generators
+
+This chapter describes the data your components produce — the node shape and tag set
+that everything else builds on.
+
+== A node is a map
+
+The UI is a tree of *nodes*. A node is a plain map of exactly this shape:
+
+[source,clojure]
+-----
+{:com.fulcrologic.fulcro.tui.engine/tag      :vbox    ; one of the legal tags
+ :com.fulcrologic.fulcro.tui.engine/attrs    {...}    ; layout / style / event attributes
+ :com.fulcrologic.fulcro.tui.engine/children [...]}   ; child nodes, strings, and numbers
+-----
+
+(The node vocabulary — `tag`, `attrs`, `children`, `node` — is defined as
+`::engine/…` specs in the `engine` namespace.)
+
+You rarely write these maps by hand. The *element generators* build them for you,
+and they all share one calling convention: an optional leading attribute map,
+followed by children.
+
+[source,clojure]
+-----
+(elements/vbox {:padding 1 :border? true}      ; <1>
+  (elements/text {:color :cyan} "Name:")        ; <2>
+  (elements/text {} "value")
+  "a bare string is a text child")              ; <3>
+-----
+<1> The first argument, if it is a map, is the node's `attrs`.
+<2> Remaining arguments are children: other nodes…
+<3> …or bare strings/numbers, which become text. `nil` children are dropped, and
+    nested sequential collections (e.g. the result of `map`/`for`) are flattened in,
+    so you can splice a generated list of children directly.
+
+`engine/node?` returns true for any map carrying a legal tag.
+
+== The tag set
+
+`engine/tags` is the set of legal node tags:
+
+[cols="1,4"]
+|===
+| Tag | Meaning
+
+| `:vbox`     | Container that stacks its children *vertically* (divides height).
+| `:hbox`     | Container that stacks its children *horizontally* (divides width).
+| `:box`      | A single styling/padding/border container; each child fills its content area.
+| `:text`     | A leaf that renders its string/number children as text (optionally wrapped).
+| `:input`    | A leaf editable text field (single-line or multiline).
+| `:button`   | A leaf activatable control; renders its children as a label.
+| `:line`     | A leaf rule (horizontal or vertical).
+| `:viewport` | A fixed-size container whose larger child *scrolls* within it.
+| `:modal`    | An overlay window the driver floats on top of the rest of the UI.
+|===
+
+Each tag has a same-named generator: `elements/vbox`, `elements/hbox`,
+`elements/box`, `elements/text`, `elements/input`, `elements/button`,
+`elements/line`, `elements/viewport`, `elements/modal`. There is also
+`elements/picker` (a list picker built on `modal`), covered in
+<<_modals_pickers,Modals & Pickers>>.
+
+TIP: `elements/input` takes a single `attrs` map (no children) — inputs are
+*controlled*, so their text comes from `:value`, not from child nodes.
+
+== From components to nodes: the render pipeline
+
+Your component renders return node trees that may still contain *component
+instances* (the result of calling a factory). The `engine` namespace turns that into
+a pure node tree ready to lay out:
+
+* `engine/render-tree` — walks a value, recursively replacing every component
+  instance with the node tree its render produces. The result contains no component
+  instances.
+* `engine/render-root` — given a root class and its props, builds the root instance
+  and walks it with `render-tree`.
+* `engine/render-buffer` / `engine/screen` — paint a *placed* tree into a cell buffer
+  and read it back as strings (used heavily in tests; see
+  <<_testing_headless,Testing>>).
+
+You normally never call these directly — the driver does. They matter when you want
+to render a tree headlessly (e.g. in a test).
+
+= Defining Components
+
+TUI components are *ordinary* Fulcro components. There is no special macro.
+
+[IMPORTANT]
+====
+Define components with the stock `com.fulcrologic.fulcro.components/defsc`. Its
+`:render` body simply returns a tree of TUI nodes, and the TUI walker
+(`engine/render-tree`) drives it instead of React. There is no `tui/defsc` — a custom
+macro existed in early prototypes but has been removed.
+====
+
+== A minimal component
+
+[source,clojure]
+-----
+(comp/defsc Greeting [this {:keys [greeting]}]
+  {:query [:greeting]}
+  (elements/vbox {:padding 1}
+    (elements/text {:bold true} (or greeting ""))))
+-----
+
+`:query`, `:ident`, `:initial-state`, and the rest of `defsc`'s options work exactly
+as they do in a browser Fulcro app — they are about *data*, not rendering. Only the
+render body differs: it returns nodes instead of DOM.
+
+== Children of components
+
+To render a child component, build a factory for it and call it inside your render,
+then place the result among your nodes:
+
+[source,clojure]
+-----
+(def ui-greeting (comp/factory Greeting))           ; <1>
+
+(comp/defsc Root [this props]
+  {:query [{:greeting (comp/get-query Greeting)}]}
+  (elements/vbox {}
+    (ui-greeting (:greeting props))))               ; <2>
+-----
+<1> Use Fulcro's stock `comp/factory` (and `comp/computed-factory` when you need to
+    pass a computed map). The TUI walker recognizes the instances they produce.
+<2> Call the factory in render; the walker replaces the instance with its rendered
+    node subtree.
+
+NOTE: The walker uses Fulcro's stock factories and render-time dynamic vars
+(`comp/*app*`/`comp/*parent*`). There is no TUI-specific `factory`/`computed-factory`.
+`engine/render-tree` / `engine/render-root` drive the walk, and
+`engine/*current-focus*` (read by `elements/focused?`) carries the focused id during a
+render.
+
+== Triggering change: `transact!`
+
+Event handlers update state by running mutations, exactly as in any Fulcro app.
+`elements/transact!` is a thin re-export of Fulcro's raw `transact!`:
+
+[source,clojure]
+-----
+(elements/button {:id          :save
+                  :on-activate (fn [] (elements/transact! this [(set-field {:k :form/saved? :v true})]))}
+  " Save ")
+-----
+
+Because the app is built with *synchronous* transactions and a render hook, the
+transaction runs and the screen repaints before control returns.
+
+= Layout
+
+Containers divide space along one axis and let children fill the other. Sizing is
+declared with attributes on each child.
+
+== Boxes and stacking
+
+* `elements/vbox` stacks children top-to-bottom, dividing *height* among them; each
+  child fills the box *width* unless it declares its own.
+* `elements/hbox` stacks children left-to-right, dividing *width*; each fills the
+  *height*.
+* `elements/box` is a single styling/padding/border container; each child fills its
+  content area (useful for borders/padding around one thing).
+
+== Sizing attributes
+
+On a child of a `vbox`/`hbox`, the *main-axis* size (height in a vbox, width in an
+hbox) is resolved from these attributes, in order of precedence:
+
+[cols="1,4"]
+|===
+| Attribute | Meaning
+
+| `:width` / `:height` (integer) | A fixed cell count.
+| `:width` / `:height` `:half`   | Half the available extent.
+| `:width` / `:height` `[:fraction f]` | The fraction `f` (0.0–1.0) of the extent, rounded.
+| `:grow <weight>` | Share the leftover space after fixed/fraction/content children, split by weight.
+| (none) | Fall back to the child's *intrinsic* (content-driven) size.
+|===
+
+`:grow` children divide whatever is left after the fixed- and content-sized children
+are placed. Multiple grow children split by their relative weights.
+
+On the *cross axis*, a child fills the track by default; if it declares a cross-axis
+size, `:align` (`:start` / `:center` / `:end`, with `:middle`/`:right`/`:bottom`
+aliases) positions it within the track.
+
+[source,clojure]
+-----
+(elements/hbox {:height 1}
+  (elements/text {:width 8 :color :cyan} "Name:")   ; <1>
+  (elements/input {:id :name :grow 1 :value v}))     ; <2>
+-----
+<1> A fixed 8-column label.
+<2> The input grows to fill the rest of the row.
+
+== Borders and padding
+
+`:border?` draws a single-cell box-drawing border; `:padding` (a non-negative
+integer) insets the content on every edge. Both shrink the content area available to
+children. `:min-width` / `:min-height` set a floor on a node's size.
+
+== Style attributes
+
+Style attributes apply to a node and its painted text:
+
+[cols="1,4"]
+|===
+| Attribute | Meaning
+
+| `:color <kw>`   | Foreground color (a palette keyword, e.g. `:cyan`, `:bright-white`).
+| `:bg <kw>`      | Background color.
+| `:bold true`    | Bold text.
+| `:highlight true` | Reverse video (used to show focus/selection).
+|===
+
+The color palette is the 16 ANSI colors: `:black :red :green :yellow :blue
+:magenta :cyan :white` and their `:bright-*` variants. See `engine/palette`.
+
+== Viewports (scrolling)
+
+A `:viewport` is a *fixed-size* container whose single (potentially larger) child is
+laid out at its natural size and scrolls within the viewport's bounds. Give it a
+fixed `:height` (and/or `:width`) and an `:id` (so its scroll position can be
+tracked):
+
+[source,clojure]
+-----
+(elements/viewport {:id :items :height 6 :border? true}
+  (elements/vbox {}
+    (for [i (range 15)]
+      (elements/button {:id (keyword (str "item-" i)) :highlight (elements/focused? (keyword (str "item-" i)))}
+        (str "Item " i)))))
+-----
+
+The driver auto-scrolls a viewport to keep the focused child visible (Tab/Arrows),
+and PageUp/PageDown page through it. See
+<<_buttons_focus_keyboard,Buttons, Focus & Keyboard>>.
+
+= Text, Inputs & Multiline
+
+== Text and wrapping
+
+`elements/text` renders its string/number children as text. By default text is *not*
+wrapped — embedded newlines (`\n`) break lines, but a long line is clipped to its
+width. Set `:wrap true` to word-wrap to the node's content width:
+
+[source,clojure]
+-----
+(elements/box {:width 40 :height 5 :border? true}
+  (elements/text {:wrap true} "This paragraph wraps to its fixed-width box."))
+-----
+
+Wrapping is width-aware: it measures display columns (`engine/string-width`), so wide
+(East-Asian/emoji) and zero-width characters are handled correctly, never split
+across a cell boundary.
+
+== Single-line inputs
+
+`elements/input` is a *controlled* field: its text comes from `:value` and edits flow
+out through `:on-change`. You store the value in app state and feed it back in:
+
+[source,clojure]
+-----
+(elements/input {:id        :email
+                 :grow      1
+                 :value     (or email "")
+                 :on-change (fn [v _caret]
+                              (elements/transact! this [(set-field {:k :form/email :v v})]))})
+-----
+
+The handler-arg conventions for input-related attributes are:
+
+[cols="1,3"]
+|===
+| Attribute | Called as
+
+| `:on-change` | `(handler new-value new-caret)`
+| `:on-submit` | `(handler current-value)` — fired on *Enter* in a single-line input.
+| `:on-key`    | `(handler key-event)`
+| `:on-activate` | `(handler)` — no args.
+| `:on-focus` / `:on-lost-focus` | `(handler id)`
+|===
+
+The caret position is tracked for you in a transient runtime store. If you prefer to
+own the caret in state, set a `:caret` attribute and manage it yourself.
+
+== Multiline inputs
+
+Add `:multiline? true` (and usually a fixed `:height`) for a text-area. The value is
+a single string that may contain `\n`; it wraps to the input's width, the arrow keys
+move the caret (Up/Down by *visual* line), and *Enter inserts a newline* (it does not
+submit). The box self-scrolls to keep the caret visible.
+
+[source,clojure]
+-----
+(elements/input {:id         :notes
+                 :multiline? true
+                 :height     4
+                 :value      (or notes "")
+                 :on-change  (fn [v _caret]
+                               (elements/transact! this [(set-field {:k :form/notes :v v})]))})
+-----
+
+= Buttons, Focus & Keyboard
+
+== Buttons
+
+`elements/button` renders its children as a label and carries an `:on-activate`
+handler (called with no args) fired by *Enter* or *Space* when focused:
+
+[source,clojure]
+-----
+(elements/button {:id          :save
+                  :highlight   (elements/focused? :save)
+                  :on-activate (fn [] (elements/transact! this [(save-form)]))}
+  " Save ")
+-----
+
+== The focus model
+
+Focus is a single piece of state: the `:id` of the focused node. A node is
+*focusable* when it has an `:id` and is an `:input` or `:button`, or sets
+`:focusable? true`, or carries any focus-relevant handler. The current focus drives
+which node receives keys and which shows its highlight.
+
+Within render, `elements/focused?` tells you whether a given id currently has focus
+(so you can set `:highlight (elements/focused? :save)`). The focus *state* and ring
+live in the `engine` namespace:
+
+* `engine/focus!` — set the focused id (and trigger a render).
+* `engine/current-focus` — read the focused id from an app or state-map.
+* `engine/focus-order` / `engine/focusables` — compute the focus ring (document
+  order, with an optional `:priority` attribute to reorder).
+
+== The keyboard ring
+
+The driver routes keys for you:
+
+* *Tab* / *Down* → next focusable; *Shift-Tab* / *Backtab* / *Up* → previous
+  (wrapping). A *multiline* input captures Up/Down for caret movement instead.
+* A focused `:input` gets controlled-text editing.
+* *Enter* / *Space* on a focusable with `:on-activate` activates it.
+* Otherwise the key *bubbles*: the focused node's `:on-key`, then its ancestors'
+  `:on-key`, then the *global keymap*.
+
+== The global keymap
+
+A global keymap maps a *normalized chord* to a handler `(fn [app key-event])`. A
+chord is the key's keyword or 1-char string, optionally prefixed with a vector of
+modifier keywords. Reserved chords like quit are dispatched at the loop level,
+regardless of focus:
+
+[source,clojure]
+-----
+;; via start! / run-blocking! / mount! run options:
+(app/start! {:root-class Root}
+            {:global-keymap {[:ctrl "q"] (fn [app _event] (app/quit! app))}})
+
+;; …or as an app-level default, declared once on the application:
+(app/application {:root-class Root
+                  :global-keymap {[:ctrl "q"] (fn [app _event] (app/quit! app))}})
+-----
+
+A keymap passed at run time (`mount!`/`run-blocking!`/`start!` run options) wins;
+otherwise the app-level default registered at `application`/`start!` time is used.
+
+`engine/key-chord` computes the chord for an event; `[:ctrl "q"]` is Ctrl-Q, `:tab`
+is Tab, `"a"` is the letter a. Key events themselves are normalized maps with
+`:key :char :ctrl? :alt? :shift?` (and `:raw`); special keys live in
+`term/special-keys` (`:enter :tab :escape :backspace :delete :up :down :left
+:right :home :end :page-up :page-down :backtab`).
+
+= Modals & Pickers
+
+== Modals
+
+`elements/modal` is an *overlay window* the driver floats over the rest of the UI.
+While a modal is open the driver *traps focus and keyboard input* to it — the controls
+behind it are inert. The modal owns no lifecycle state: *you* toggle `:open?` (and
+record any result) with your own mutations.
+
+[source,clojure]
+-----
+(elements/modal {:id         :confirm
+                 :open?      confirm-open?
+                 :title      "Confirm reset"
+                 :width      40 :height 7
+                 :on-dismiss (fn [] (elements/transact! this [(close-confirm)]))} ; Escape calls this
+  (elements/text {:wrap true} "Reset every field? This cannot be undone.")
+  (elements/line {})
+  (elements/hbox {:height 1 :align :center}
+    (elements/button {:id :confirm-reset  :highlight (elements/focused? :confirm-reset)
+                      :on-activate (fn [] (elements/transact! this [(reset-form)]))} " Reset ")
+    (elements/text {:width 2} "")
+    (elements/button {:id :confirm-cancel :highlight (elements/focused? :confirm-cancel)
+                      :on-activate (fn [] (elements/transact! this [(close-confirm)]))} " Cancel ")))
+-----
+
+Modal attributes:
+
+* `:open?` — the overlay is active (composited + focus-trapped) only when truthy;
+  when falsy it renders nothing.
+* `:width` / `:height` — a cell count or `[:fraction f]` of the screen; defaults to
+  the modal's intrinsic content size.
+* `:align` — `:center` (default), `:start`, or `:end`.
+* `:border?` — defaults to `true`. `:title` paints a string on the top border.
+* `:on-dismiss` — a zero-arg handler fired on *Escape*.
+
+The modal node can live in your render tree at all times; it simply renders nothing
+while `:open?` is falsy. Closed modals are stripped from layout and never focusable.
+
+== Pickers
+
+`elements/picker` is a *list picker* built on `modal`: a scrollable viewport of
+selectable rows where the focused row *is* the highlighted choice. Up/Down move the
+highlight (the list scrolls to follow), Enter selects, Escape cancels.
+
+[source,clojure]
+-----
+(elements/picker {:id        :fruit
+                  :open?     picker-open?
+                  :title     "Pick a fruit"
+                  :width     24 :height 8
+                  :options   [{:value :apple :label "Apple"}
+                              {:value :pear  :label "Pear"}]
+                  :on-select (fn [v] (elements/transact! this [(choose-fruit {:v v})]))
+                  :on-cancel (fn []  (elements/transact! this [(close-picker)]))})
+-----
+
+`:options` is a vector of `{:value … :label …}` maps; `:on-select` is called with a
+row's `:value`; `:on-cancel` is wired to the modal's `:on-dismiss` (Escape). Like a
+modal, it is a pure composition of existing nodes — state and selection are yours.
+
+= The Application Lifecycle
+
+The lifecycle namespace is `com.fulcrologic.fulcro.tui.application` (alias `app`). It
+builds the Fulcro application and runs the terminal driver loop.
+
+== The one-call entrypoint: `start!`
+
+For the common case, `app/start!` does everything — build the app and run it to
+completion (blocking until the loop ends):
+
+[source,clojure]
+-----
+(app/start! {:root-class Root}                                  ; <1>
+            {:global-keymap {[:ctrl "q"] (fn [a _e] (app/quit! a))}}) ; <2>
+-----
+<1> *App options* — the same map `app/application` takes (`:root-class`,
+    `:initial-state`, `:remotes`, `:global-keymap`, `:inspect?`).
+<2> *Run options* (optional) — the same map `app/mount!`/`app/run-blocking!` take
+    (`:terminal`, `:global-keymap`, `:on-error`).
+
+`(app/start! app-opts run-opts)` is exactly
+`(app/run-blocking! (app/application app-opts) run-opts)`. Reach for the two-step form
+below only when you need a handle on the app *before* the loop starts (e.g. to seed
+state manually, or to mount on a custom terminal in a test).
+
+== Building the app
+
+`app/application` returns a synchronous raw Fulcro app whose every state change
+repaints the terminal (once a terminal is attached):
+
+[source,clojure]
+-----
+(app/application
+  {:root-class    Root          ; <1>
+   :initial-state false          ; <2>
+   :remotes       {...}          ; <3>
+   :global-keymap {...}          ; <4>
+   :inspect?      false})        ; <5>
+-----
+<1> *Required.* The TUI root component class (a stock `comp/defsc`).
+<2> Initialize app state from the root class's `:initial-state`. *Defaults to
+    `true`* — pass `false` only to opt out (e.g. when you seed the db yourself).
+<3> Optional Fulcro remotes map (for talking to a server).
+<4> Optional *app-level default* global keymap (chord → `(fn [app key-event])`).
+    `mount!`/`run-blocking!`/`start!` use it unless given their own `:global-keymap`,
+    so you can declare a quit chord once here instead of repeating it per run.
+<5> Debug-only Fulcro Inspect hook — see <<_debugging_with_fulcro_inspect>>.
+    Defaults to the `tui.inspect` system property.
+
+=== Recommended: declare `:initial-state` on the Root
+
+The idiomatic Fulcro way to seed app state is to declare `:initial-state` on the
+root component (composing it down through children). Because `app/application`
+initializes from the root by default, that is *all* you need:
+
+[source,clojure]
+-----
+(comp/defsc Root [this props]
+  {:query         [:greeting]
+   :initial-state {:greeting "Hello, terminal!"}}  ; a map, or (fn [params] ...)
+  ...)
+
+(app/application {:root-class Root})   ; initialized from Root :initial-state by default
+-----
+
+This is the canonical, default behavior — it survives refactoring and scales as you
+add child components with their own initial state. It is exactly what the bundled
+demo does (its `Root` declares `:initial-state (fn [_] initial-db)` and its `-main`
+is just `(app/application {:root-class Root})`).
+
+=== Quick-start escape hatch: seed the db directly
+
+If your root keeps a flat, top-level db, you can instead pass `:initial-state false`
+and `reset!` the state-atom directly. This is a quick hack for a tiny flat app; it
+does not compose, so prefer the recommended form as soon as you have child
+components.
+
+NOTE: The bundled demo *no longer* uses this form — it was switched to declared
+`:initial-state` on the Root. The `include::`d demo source above shows the
+canonical pattern.
+
+[source,clojure]
+-----
+(let [a (app/application {:root-class Root :initial-state false})]
+  (reset! (:com.fulcrologic.fulcro.application/state-atom a) initial-db)
+  ...)
+-----
+
+No terminal is attached by `application`; attach one with `mount!` or `run-blocking!`.
+
+== Mounting and running
+
+`app/mount!` attaches a terminal and starts the keyboard input loop on a new thread,
+returning a *handle*:
+
+[source,clojure]
+-----
+(app/mount! a
+  {:terminal      (term/jline-terminal)   ; <1>
+   :global-keymap {[:ctrl "q"] (fn [app _e] (app/quit! app))} ; <2>
+   :on-error      (fn [app throwable] (println "loop died:" throwable))}) ; <3>
+;; => {:app a :terminal t :thread <Thread> :running? <atom true> :error <atom nil>}
+-----
+<1> Optional. Defaults to a real `term/jline-terminal`; tests pass a
+    `term/string-terminal`.
+<2> Optional. Reserved chords dispatched at the loop level (fire regardless of focus).
+    Defaults to the keymap registered on the app at `application`/`start!` time.
+<3> Optional `(fn [app throwable])` called if the input loop throws. The loop also
+    stashes the throwable on the handle's `:error` atom and always leaves the terminal.
+
+The returned *handle* map is `{:app :terminal :thread :running? :error}`: `:running?`
+is an atom you can set false to stop the loop, and `:error` is an atom holding any
+uncaught loop exception (else `nil`) — so `run-blocking!`'s `.join` returning does not
+silently hide a crash; check `@(:error handle)`.
+
+`app/run-blocking!` is `mount!` plus a `.join` on the loop thread — it blocks until
+the terminal reaches EOF or the loop is stopped. The usual `-main` simply uses
+`start!`, but the two-step form is handy when you need the app first:
+
+[source,clojure]
+-----
+(defn -main [& _]
+  (let [a (app/application {:root-class Root})]
+    ;; ... optionally inspect/seed `a` here ...
+    (app/run-blocking! a {:global-keymap {[:ctrl "q"] (fn [app _e] (app/quit! app))}})
+    (println "Goodbye.")))
+-----
+
+`app/quit!` stops the loop (sets `:running?` false, drops the resize handler, leaves
+the terminal — which forces a blocked read to EOF — then best-effort interrupts the
+thread). It accepts either the handle or the app.
+
+== Lower-level entry points
+
+* `app/attach!` — attach a terminal and do the initial paint, *without* starting a
+  loop (you drive it yourself).
+* `app/step!` — run one deterministic iteration (dispatch a key, then repaint). The
+  backbone of tests.
+* `app/screen-of` / `app/screen-styled-of` — read the most-recently-painted buffer
+  back as row strings (or styled cell maps). Essential for headless assertions.
+
+= Debugging with Fulcro Inspect
+
+`fulcro-tui` apps can be observed live in the standalone *Fulcro Inspect* (Electron)
+application — the same tool used for browser Fulcro apps. You get the transaction
+log, network activity, and DB state/changes streaming from your terminal app.
+
+This has been *verified end-to-end*: transactions and state changes stream to Inspect
+in real time.
+
+== How it works
+
+In a browser, Fulcro Inspect connects over a websocket via a CLJS-only "electron
+target." The JVM has no such target, so `fulcro-tui` ships a small CLJ shim,
+`com.fulcrologic.fulcro.tui.inspect`, that provides the one missing piece: a
+`DevToolConnectionFactory` that speaks Sente over a real websocket from the JVM. The
+rest of the inspect pipeline (event generation, devtools-remote transport) is already
+CLJC and ships transitively with Fulcro 3.10.x.
+
+[IMPORTANT]
+====
+The shim ships *in the library* (`src/main/com/fulcrologic/fulcro/tui/inspect.clj`)
+and is *debug-only*: it is never loaded by normal or babashka runs. `app/application`
+resolves it lazily, via `requiring-resolve`, only when inspect is enabled — so it
+costs nothing (and pulls in no `core.async`/Sente) unless you ask for it.
+====
+
+NOTE: Inspect is *JVM-only*. The connector requires `clojure.core.async` and
+`taoensso.sente`, which do not run under babashka/SCI. By contrast, the TUI core
+itself — the element generators and the `step!` loop driven through a
+`string-terminal` — runs fine under babashka; only the Inspect connector is excluded.
+
+== Prerequisites
+
+. The standalone *Fulcro Inspect (Electron)* app must be *running*. It hosts the
+  websocket server on *localhost:8237*.
+. Inspect must be *enabled* — either pass `:inspect? true` to `app/application`, or
+  set `-Dtui.inspect=true` (the `:inspect` deps alias does this). The shim itself is
+  always on the classpath, since it ships in the library.
+
+== Two ways to turn it on
+
+=== The easy way: `add-inspect!`
+
+The one-call entry point is `add-inspect!`:
+
+[source,clojure]
+-----
+(require '[com.fulcrologic.fulcro.tui.inspect :as tui-inspect])
+
+(tui-inspect/add-inspect! app)
+-----
+
+This single call does everything:
+
+* *Force-enables both inspect gates at runtime* — so you do **not** need any JVM `-D`
+  flags. (There are two independent gates: Fulcro's inspect gate and the
+  devtools-common target gate. Both are read once at namespace load, so the shim
+  flips the realized vars directly via `alter-var-root`.)
+* *Installs the JVM Sente websocket factory* (`install!`).
+* *Attaches Fulcro Inspect to your app* (`fulcro.inspect.tool/add-fulcro-inspect!`).
+
+If you only need parts, the shim also exposes `tui-inspect/install!` (register the
+websocket factory once) and `tui-inspect/enable!` (force the gates on) separately.
+
+=== Through the app builder
+
+`app/application` accepts an `:inspect?` option that, when truthy, lazily resolves and
+calls `add-inspect!` for you:
+
+[source,clojure]
+-----
+(app/application {:root-class Root :inspect? true})
+-----
+
+Its default is the value of the `tui.inspect` system property, which leads to the
+most convenient workflow:
+
+== The `:inspect` deps alias (recommended)
+
+The project's `deps.edn` defines an `:inspect` alias that simply sets
+`-Dtui.inspect=true` (the shim already ships in the library, so no extra source path
+is needed):
+
+[source,clojure]
+-----
+:inspect {:jvm-opts ["-Dtui.inspect=true"]}
+-----
+
+Combine it with the `:tui` alias to run the demo with Inspect wired up:
+
+[source,bash]
+-----
+clojure -M:tui:inspect
+-----
+
+Because `-Dtui.inspect=true` flips `app/application`'s `:inspect?` default to true,
+the app calls `add-inspect!` at startup — no code change required. Just make sure the
+Inspect Electron app is already running on localhost:8237.
+
+== Troubleshooting
+
+[cols="1,3"]
+|===
+| Symptom | Likely cause
+
+| Nothing shows up in Inspect | The Electron app isn't running, or isn't on localhost:8237.
+| Inspect never connects | Inspect wasn't enabled — pass `:inspect? true` or set `-Dtui.inspect=true` (use the `:inspect` alias).
+| Connected once but no events | The inspect gates weren't enabled before the pipeline loaded; prefer `add-inspect!` (which `alter-var-root`s the realized vars) over setting `-D` flags after load.
+| Works on JVM, fails under babashka | Inspect is JVM-only. The shim uses `core.async` go-loops and Sente; run inspect sessions on the JVM.
+|===
+
+= Testing / Headless
+
+The library is built to be exercised without a real terminal: a fake terminal plus a
+deterministic single-step driver let you assert on exactly what would be painted.
+
+== The pieces
+
+* `term/string-terminal` — an atom-backed fake `Terminal`. Construct it with `:rows`,
+  `:cols`, and (optionally) a scripted seq of `:keys` that `t-read-key` dequeues in
+  order. Inspect it with `term/output` and `term/cursor`; drive it with `term/feed!`
+  and `term/resize!`.
+* `app/attach!` — attach the fake terminal and do the initial paint (no input loop).
+* `app/step!` — dispatch one key event and repaint, deterministically.
+* `app/screen-of` / `app/screen-styled-of` — read the most-recently-painted buffer
+  back as row strings (or styled cell maps) for assertions.
+* `engine/current-focus`, `engine/get-caret`, `engine/viewport-scroll` — read focus,
+  caret, and scroll state.
+* `term/key-event` builds a normalized key event; a key event is just a map
+  (`{:key … :char … :ctrl? …}`), so tests usually write the map literal directly.
+
+== A worked example
+
+This mirrors the library's own `application-spec`. A root with a single input:
+
+[source,clojure]
+-----
+(ns my.tui-test
+  (:require
+    [com.fulcrologic.fulcro.components :as comp]
+    [com.fulcrologic.fulcro.mutations :as m]
+    [com.fulcrologic.fulcro.tui.elements :as elements]
+    [com.fulcrologic.fulcro.tui.engine :as engine]
+    [com.fulcrologic.fulcro.tui.application :as app]
+    [com.fulcrologic.fulcro.tui.terminal :as term]
+    [clojure.string :as str]
+    [clojure.test :refer [deftest is]]))
+
+(m/defmutation set-a [{:keys [v]}]
+  (action [{:keys [state]}] (swap! state assoc :app/a v)))
+
+(comp/defsc Root [this {:keys [app/a]}]
+  {:query         [:app/a]
+   :initial-state {:app/a ""}}
+  (elements/vbox {:id "root"}
+    (elements/input {:id        :a
+                     :value     a
+                     :on-change (fn [v _caret] (elements/transact! this [(set-a {:v v})]))})))
+
+(deftest typing-updates-state-screen-and-caret
+  (let [app (app/application {:root-class Root})        ; :initial-state on by default
+        t   (term/string-terminal {:rows 4 :cols 12})]
+    (app/attach! app t)                                  ; initial paint; focus -> :a
+    (app/step! app {:key "H" :char "H"})
+    (app/step! app {:key "i" :char "i"})
+    (let [state @(:com.fulcrologic.fulcro.application/state-atom app)]
+      (is (= "Hi" (:app/a state)))                       ; the :on-change tx updated state
+      (is (str/starts-with? (nth (app/screen-of app) 0) "Hi")) ; row 0 shows the typed text
+      (is (= 2 (engine/get-caret app :a 0)))             ; caret advanced by 2
+      (is (= {:x 2 :y 0 :visible? true} (term/cursor t)))))) ; hardware cursor follows
+-----
+
+== Scripting the input loop
+
+You can also script keys onto the terminal and run the *real* loop to completion; it
+ends when `t-read-key` returns nil (the queue drains):
+
+[source,clojure]
+-----
+(let [app (app/application {:root-class Root})
+      t   (term/string-terminal {:rows 4 :cols 12
+                                 :keys [{:key "H" :char "H"} {:key "i" :char "i"}]})]
+  (app/run-blocking! app {:terminal t})   ; processes both keys, then the loop ends
+  (is (= "Hi" (:app/a @(:com.fulcrologic.fulcro.application/state-atom app))))
+  (is (true? (:left? @(.-state t)))))      ; the loop left the terminal on exit
+-----
+
+NOTE: The bundled specs under `src/test/com/fulcrologic/fulcro/tui/`
+(`application_spec.clj`, `engine_spec.clj`, `elements_spec.clj`, and
+`terminal_spec.clj`) use `fulcro-spec` rather than `clojure.test` and cover focus,
+typing, activation, viewport scrolling, multiline editing, overlays/pickers, and the
+input loop. They are the most complete worked reference.
+
+= Reference: Namespaces at a glance
+
+The library is five namespaces under `com.fulcrologic.fulcro.tui.*`:
+
+[cols="2,3"]
+|===
+| Namespace | Role
+
+| `com.fulcrologic.fulcro.tui.elements` (`elements`)
+| Element generators (`element`, `vbox`, `hbox`, `box`, `text`, `input`, `button`, `line`, `viewport`, `modal`, `picker`), plus `focused?` and `transact!`.
+
+| `com.fulcrologic.fulcro.tui.engine` (`engine`)
+| The node model, walker, layout, paint, and diff. Defines the node vocabulary (`::engine/tag`/`attrs`/`children`/`node`), `node?`, node accessors, the render pipeline (`render-tree`/`render-root`/`render-buffer`/`screen`), focus & scroll state (`focus!`, `current-focus`, `focus-order`, `focusables`, `get-caret`, `viewport-scroll`, `*current-focus*`), and helpers (`string-width`, `palette`, `key-chord`).
+
+| `com.fulcrologic.fulcro.tui.application` (`app`)
+| The application lifecycle and terminal driver: `application`, `attach!`, `mount!`, `run-blocking!`, `quit!`, `step!`, and the inspection helpers `screen-of`/`screen-styled-of`.
+
+| `com.fulcrologic.fulcro.tui.terminal` (`term`)
+| The terminal abstraction: the `Terminal` protocol, `jline-terminal`, the `string-terminal` fake, the normalized key-event model (`key-event`, `special-keys`), and the pure key decoder (`decode-key`).
+
+| `com.fulcrologic.fulcro.tui.inspect` (`tui-inspect`)
+| Debug-only Fulcro Inspect connector (`add-inspect!`, `install!`, `enable!`). Ships in `src/main` but is loaded lazily, only when inspect is enabled.
+|===
+
+== Dependency direction
+
+The namespaces form an acyclic graph:
+
+* `elements` → `engine`
+* `application` → `engine` + `elements` + `terminal`
+* `terminal` — standalone (no dependency on the others)
+* `inspect` — loaded lazily by `application` only when inspect is enabled
