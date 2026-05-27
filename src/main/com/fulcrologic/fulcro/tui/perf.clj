@@ -11,8 +11,8 @@
      macro-expanded, both expand to just `(do body...)` — no runtime check, no volatile read, no
      trace of profiling in the compiled code. So these points are safe to leave in shipped render
      code, and the shipped library (compiled without the property) carries no profiling at all.
-   * **No new dependencies.** Lives in `src/main` (the render code must be able to call `p`, and a
-     published library cannot depend on `src/bench`), but pulls in nothing.
+   * **No new dependencies.** Lives in `src/main` (the shipped render code calls `p` directly), but
+     pulls in nothing.
    * **Self-time accounting.** Each `p` records both *total* (inclusive) and *self* (exclusive of
      nested `p`s) time, so it is safe to instrument recursive code (e.g. the paint walker) and read
      a meaningful per-id breakdown.

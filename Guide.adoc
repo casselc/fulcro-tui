@@ -45,6 +45,20 @@ NOTE: This library is *alpha* — not yet API-stable — but the UI machinery is
 and the Fulcro patterns it builds on have been stable for years. Expect any changes
 to be minor.
 
+[IMPORTANT]
+====
+*The Fulcro API is the API.* `fulcro-tui` is **just a rendering target** — you build a
+normal Fulcro app (`defsc` components, queries, idents, normalized state, mutations,
+`comp/transact!`, `:initial-state`) and this library only changes where it draws: a
+terminal instead of the DOM. There are no TUI replacements for Fulcro's data or
+transaction APIs.
+
+So this guide assumes you already know Fulcro — for Fulcro proper, see the *Fulcro
+Developer's Guide* at https://book.fulcrologic.com[book.fulcrologic.com]. What follows
+covers only what is specific to the terminal target: the *elements* you render in place
+of DOM, layout, focus/keyboard, and the run loop.
+====
+
 == What you need
 
 Add the dependency (use the latest version from the badge on the project README):
@@ -66,7 +80,7 @@ aliases the real source and tests use:
 |===
 | Namespace | Alias | What's in it
 
-| `com.fulcrologic.fulcro.tui.elements`    | `elements` | Element generators (`vbox`, `text`, …), `focused?`, `transact!`.
+| `com.fulcrologic.fulcro.tui.elements`    | `elements` | Element generators (`vbox`, `text`, …) and `focused?`.
 | `com.fulcrologic.fulcro.tui.engine`      | `engine`   | Node model, render pipeline, layout/paint, focus & scroll state.
 | `com.fulcrologic.fulcro.tui.application` | `app`      | The application lifecycle and terminal driver.
 | `com.fulcrologic.fulcro.tui.terminal`    | `term`     | The `Terminal` abstraction and key-event model.
@@ -142,101 +156,72 @@ The full demo source is the best reference for "real" usage and is referenced
 throughout this guide. It is reproduced in full in
 <<demo-source,Appendix: The complete demo source>>.
 
-= The Node Model & Element Generators
+= Elements: the building blocks
 
-This chapter describes the data your components produce — the node shape and tag set
-that everything else builds on.
+Instead of DOM, your components return a tree of *elements* — boxes, text, inputs,
+buttons — built with the generators in `com.fulcrologic.fulcro.tui.elements`. This
+chapter is the catalog of what you can put on screen and how you call the generators.
 
-== A node is a map
+== Calling convention
 
-The UI is a tree of *nodes*. A node is a plain map of exactly this shape:
-
-[source,clojure]
------
-{:com.fulcrologic.fulcro.tui.engine/tag      :vbox    ; one of the legal tags
- :com.fulcrologic.fulcro.tui.engine/attrs    {...}    ; layout / style / event attributes
- :com.fulcrologic.fulcro.tui.engine/children [...]}   ; child nodes, strings, and numbers
------
-
-(The node vocabulary — `tag`, `attrs`, `children`, `node` — is defined as
-`::engine/…` specs in the `engine` namespace.)
-
-You rarely write these maps by hand. The *element generators* build them for you,
-and they all share one calling convention: an optional leading attribute map,
-followed by children.
+Every generator takes an optional leading *attribute map*, then any number of children:
 
 [source,clojure]
 -----
-(elements/vbox {:padding 1 :border? true}      ; <1>
-  (elements/text {:color :cyan} "Name:")        ; <2>
+(elements/vbox {:padding 1 :border? true}       ; <1>
+  (elements/text {:color :cyan} "Name:")         ; <2>
   (elements/text {} "value")
-  "a bare string is a text child")              ; <3>
+  "a bare string is a text child")               ; <3>
 -----
-<1> The first argument, if it is a map, is the node's `attrs`.
-<2> Remaining arguments are children: other nodes…
-<3> …or bare strings/numbers, which become text. `nil` children are dropped, and
-    nested sequential collections (e.g. the result of `map`/`for`) are flattened in,
-    so you can splice a generated list of children directly.
+<1> The first argument, if it is a map, is the element's attributes — layout, style,
+    and event handlers. Omit it for defaults.
+<2> Remaining arguments are children: other elements…
+<3> …or bare strings/numbers, which become text. `nil` children are dropped, and nested
+    sequential collections (e.g. the result of `map`/`for`) are flattened in, so you can
+    splice a generated list of children directly.
 
-`engine/node?` returns true for any map carrying a legal tag.
-
-== The tag set
-
-`engine/tags` is the set of legal node tags:
+== The element catalog
 
 [cols="1,4"]
 |===
-| Tag | Meaning
+| Generator | What it gives you
 
-| `:vbox`     | Container that stacks its children *vertically* (divides height).
-| `:hbox`     | Container that stacks its children *horizontally* (divides width).
-| `:box`      | A single styling/padding/border container; each child fills its content area.
-| `:text`     | A leaf that renders its string/number children as text (optionally wrapped).
-| `:input`    | A leaf editable text field (single-line or multiline).
-| `:button`   | A leaf activatable control; renders its children as a label.
-| `:line`     | A leaf rule (horizontal or vertical).
-| `:viewport` | A fixed-size container whose larger child *scrolls* within it.
-| `:modal`    | An overlay window the driver floats on top of the rest of the UI.
+| `elements/vbox`     | A container that stacks its children *vertically*. See <<_layout,Layout>>.
+| `elements/hbox`     | A container that stacks its children *horizontally*. See <<_layout,Layout>>.
+| `elements/box`      | A single styling/padding/border container; its child fills the content area.
+| `elements/text`     | Text (its string/number children), optionally wrapped to its width. See <<_text_inputs_multiline,Text>>.
+| `elements/input`    | An editable text field — single-line or multiline. See <<_text_inputs_multiline,Inputs>>.
+| `elements/button`   | An activatable control; its children are the label. See <<_buttons_focus_keyboard,Buttons>>.
+| `elements/line`     | A horizontal or vertical rule.
+| `elements/viewport` | A fixed-size window whose larger child *scrolls* within it. See <<_viewports_scrolling,Viewports>>.
+| `elements/modal`    | An overlay window floated on top of the rest of the UI. See <<_modals_pickers,Modals>>.
+| `elements/picker`   | A ready-made list picker built on `modal`. See <<_modals_pickers,Pickers>>.
 |===
 
-Each tag has a same-named generator: `elements/vbox`, `elements/hbox`,
-`elements/box`, `elements/text`, `elements/input`, `elements/button`,
-`elements/line`, `elements/viewport`, `elements/modal`. There is also
-`elements/picker` (a list picker built on `modal`), covered in
-<<_modals_pickers,Modals & Pickers>>.
+TIP: `elements/input` takes a single attributes map and *no* children — inputs are
+*controlled*, so their text comes from the `:value` attribute, not from child nodes.
 
-TIP: `elements/input` takes a single `attrs` map (no children) — inputs are
-*controlled*, so their text comes from `:value`, not from child nodes.
+`elements/focused?` (whether the element with a given id currently has focus) rounds out
+the namespace. Everything else — running mutations, querying, app state — is plain Fulcro
+(`comp/transact!` and friends); see <<_triggering_change,Triggering change>>.
 
-== From components to nodes: the render pipeline
-
-Your component renders return node trees that may still contain *component
-instances* (the result of calling a factory). The `engine` namespace turns that into
-a pure node tree ready to lay out:
-
-* `engine/render-tree` — walks a value, recursively replacing every component
-  instance with the node tree its render produces. The result contains no component
-  instances.
-* `engine/render-root` — given a root class and its props, builds the root instance
-  and walks it with `render-tree`.
-* `engine/render-buffer` / `engine/screen` — paint a *placed* tree into a cell buffer
-  and read it back as strings (used heavily in tests; see
-  <<_testing_headless,Testing>>).
-
-You normally never call these directly — the driver does. They matter when you want
-to render a tree headlessly (e.g. in a test).
+[NOTE]
+====
+Under the hood each generator just returns a plain map and the driver walks that tree
+to lay it out and paint it — you never build or inspect those maps to *use* the
+library. If you are extending the engine or writing headless tests, the node
+vocabulary and the render pipeline (`engine/render-tree`/`render-root`/`render-buffer`/
+`screen`) are covered under <<_testing_headless,Testing / Headless>>.
+====
 
 = Defining Components
 
-TUI components are *ordinary* Fulcro components. There is no special macro.
-
-[IMPORTANT]
-====
-Define components with the stock `com.fulcrologic.fulcro.components/defsc`. Its
-`:render` body simply returns a tree of TUI nodes, and the TUI walker
-(`engine/render-tree`) drives it instead of React. There is no `tui/defsc` — a custom
-macro existed in early prototypes but has been removed.
-====
+TUI components are *ordinary* Fulcro components — there is no special macro. Define them
+with the stock `com.fulcrologic.fulcro.components/defsc`; `:query`, `:ident`,
+`:initial-state`, and the rest of `defsc`'s options behave exactly as in a browser
+Fulcro app (they are about *data*, see the
+https://book.fulcrologic.com[Fulcro Developer's Guide]). The only difference is that the
+`:render` body returns a tree of elements (from the previous chapter) instead of DOM.
 
 == A minimal component
 
@@ -247,10 +232,6 @@ macro existed in early prototypes but has been removed.
   (elements/vbox {:padding 1}
     (elements/text {:bold true} (or greeting ""))))
 -----
-
-`:query`, `:ident`, `:initial-state`, and the rest of `defsc`'s options work exactly
-as they do in a browser Fulcro app — they are about *data*, not rendering. Only the
-render body differs: it returns nodes instead of DOM.
 
 == Children of components
 
@@ -271,21 +252,21 @@ then place the result among your nodes:
 <2> Call the factory in render; the walker replaces the instance with its rendered
     node subtree.
 
-NOTE: The walker uses Fulcro's stock factories and render-time dynamic vars
-(`comp/*app*`/`comp/*parent*`). There is no TUI-specific `factory`/`computed-factory`.
-`engine/render-tree` / `engine/render-root` drive the walk, and
-`engine/*current-focus*` (read by `elements/focused?`) carries the focused id during a
-render.
+NOTE: There is no TUI-specific `factory`/`computed-factory` — use Fulcro's stock
+`comp/factory` / `comp/computed-factory`. The driver recognizes the instances they
+produce and renders each in place.
 
-== Triggering change: `transact!`
+== Triggering change
 
-Event handlers update state by running mutations, exactly as in any Fulcro app.
-`elements/transact!` is a thin re-export of Fulcro's raw `transact!`:
+There is nothing TUI-specific here: an element's event handler updates state by calling
+Fulcro's own `com.fulcrologic.fulcro.components/transact!` with a mutation, exactly as in
+any Fulcro app (see the https://book.fulcrologic.com[Fulcro Developer's Guide] for
+defining and dispatching mutations).
 
 [source,clojure]
 -----
 (elements/button {:id          :save
-                  :on-activate (fn [] (elements/transact! this [(set-field {:k :form/saved? :v true})]))}
+                  :on-activate (fn [] (comp/transact! this [(set-field {:k :form/saved? :v true})]))}
   " Save ")
 -----
 
@@ -410,7 +391,7 @@ out through `:on-change`. You store the value in app state and feed it back in:
                  :grow      1
                  :value     (or email "")
                  :on-change (fn [v _caret]
-                              (elements/transact! this [(set-field {:k :form/email :v v})]))})
+                              (comp/transact! this [(set-field {:k :form/email :v v})]))})
 -----
 
 The handler-arg conventions for input-related attributes are:
@@ -443,7 +424,7 @@ submit). The box self-scrolls to keep the caret visible.
                  :height     4
                  :value      (or notes "")
                  :on-change  (fn [v _caret]
-                               (elements/transact! this [(set-field {:k :form/notes :v v})]))})
+                               (comp/transact! this [(set-field {:k :form/notes :v v})]))})
 -----
 
 = Buttons, Focus & Keyboard
@@ -457,7 +438,7 @@ handler (called with no args) fired by *Enter* or *Space* when focused:
 -----
 (elements/button {:id          :save
                   :highlight   (elements/focused? :save)
-                  :on-activate (fn [] (elements/transact! this [(save-form)]))}
+                  :on-activate (fn [] (comp/transact! this [(save-form)]))}
   " Save ")
 -----
 
@@ -530,15 +511,15 @@ record any result) with your own mutations.
                  :open?      confirm-open?
                  :title      "Confirm reset"
                  :width      40 :height 7
-                 :on-dismiss (fn [] (elements/transact! this [(close-confirm)]))} ; Escape calls this
+                 :on-dismiss (fn [] (comp/transact! this [(close-confirm)]))} ; Escape calls this
   (elements/text {:wrap true} "Reset every field? This cannot be undone.")
   (elements/line {})
   (elements/hbox {:height 1 :align :center}
     (elements/button {:id :confirm-reset  :highlight (elements/focused? :confirm-reset)
-                      :on-activate (fn [] (elements/transact! this [(reset-form)]))} " Reset ")
+                      :on-activate (fn [] (comp/transact! this [(reset-form)]))} " Reset ")
     (elements/text {:width 2} "")
     (elements/button {:id :confirm-cancel :highlight (elements/focused? :confirm-cancel)
-                      :on-activate (fn [] (elements/transact! this [(close-confirm)]))} " Cancel ")))
+                      :on-activate (fn [] (comp/transact! this [(close-confirm)]))} " Cancel ")))
 -----
 
 Modal attributes:
@@ -568,8 +549,8 @@ highlight (the list scrolls to follow), Enter selects, Escape cancels.
                   :width     24 :height 8
                   :options   [{:value :apple :label "Apple"}
                               {:value :pear  :label "Pear"}]
-                  :on-select (fn [v] (elements/transact! this [(choose-fruit {:v v})]))
-                  :on-cancel (fn []  (elements/transact! this [(close-picker)]))})
+                  :on-select (fn [v] (comp/transact! this [(choose-fruit {:v v})]))
+                  :on-cancel (fn []  (comp/transact! this [(close-picker)]))})
 -----
 
 `:options` is a vector of `{:value … :label …}` maps; `:on-select` is called with a
@@ -828,6 +809,131 @@ Inspect Electron app is already running on localhost:8237.
 | Works on JVM, fails under babashka | Inspect is JVM-only. The shim uses `core.async` go-loops and Sente; run inspect sessions on the JVM.
 |===
 
+= Measuring performance
+
+The library ships a tiny built-in profiler, `com.fulcrologic.fulcro.tui.perf` (`perf`), modeled
+on the core of https://github.com/taoensso/tufte[Tufte] — `p` profile points, a `profile` scope,
+and a self-time report. It is reimplemented with plain atoms/volatiles so it runs under
+*babashka* as well as the JVM (real Tufte's `encore` dependency does not load under SCI). The
+render and I/O hot paths are already peppered with `p` points, so you can profile a real session
+with no code changes.
+
+[IMPORTANT]
+====
+`p` and `profile` are *compile-time gated* on the `fulcro.tui.perf` system property. Unless it is
+set *when the code is loaded*, they expand to just their body — zero overhead, nothing compiled
+in. So the instrumentation is safe to leave in shipped code; you turn it on by setting the
+property at launch.
+====
+
+== Turning it on
+
+Set `fulcro.tui.perf` (to anything) when you start the app:
+
+[source,bash]
+-----
+bb -Dfulcro.tui.perf=1 tui              # babashka
+clojure -J-Dfulcro.tui.perf=1 -M:tui    # JVM
+-----
+
+== The automatic session report
+
+`run-blocking!` (and therefore `start!`) wraps the whole session in `perf/profile`. With the
+property set, the entire interactive session is profiled and a self-time table is printed to
+stdout *after you quit* — `mount!` restores the terminal first, so the table lands cleanly in
+your scrollback. The workflow:
+
+. Launch with the property set (above).
+. *Exercise the paths you care about* — scroll the list, type in the notes box, open the
+  picker/modal. The profiler only sees what you actually do.
+. Quit with *Ctrl-Q*.
+. Read the table that prints.
+
+== Reading the report
+
+A trimmed example:
+
+[source]
+-----
+id                                  nCalls    self% self(ms)  mean(µs)   p50(µs)   p99(µs)  total(ms)
+----------------------------------------------------------------------------------------------------
+:io/read-key                            29    73.5  1310.20   45179.2   20086.6  405113.0    1310.20
+:paint/vbox                             46     7.3   129.95    2825.1    4231.7   23277.8     276.37
+…/engine/row-ops                       989     5.0    89.23      90.2      87.8     150.6      89.23
+…/engine/put-str                       782     3.5    62.54      80.0      38.3     335.0      62.54
+…/application/render!                   23     0.4     7.00     304.3     312.8     355.4     424.37
+…/engine/diff                           23     0.2     3.20     139.0     125.8     262.9      92.43
+----------------------------------------------------------------------------------------------------
+Σ self = 1783.02 ms across 32 ids; wall = 1489.86 ms
+-----
+
+[cols="1,4"]
+|===
+| Column | Meaning
+
+| `id` | The profile point — a render stage (`:paint/vbox`, `…/row-ops`, `…/diff`, `…/render!`) or an I/O point (`:io/read-key`, `:io/write`, `:io/flush`).
+| `nCalls` | How many times it ran during the session.
+| `self%` / `self(ms)` | *Exclusive* time: this point minus everything nested inside it. This is where CPU time actually went; rows are sorted by it.
+| `mean` / `p50` / `p90` / `p99` / `max(µs)` | The per-call distribution of *self* time.
+| `total(ms)` | *Inclusive* time: this point including all nested points.
+|===
+
+Three things to keep in mind:
+
+* *Ignore `:io/read-key`.* It is almost always the biggest row, but it is *idle* time — the loop
+  blocking for your next keystroke, not work. It measures how long you sat there, not how slow
+  anything is.
+* *self vs. total.* `self` is exclusive of nested points; `total` is inclusive. A wrapper like
+  `render!` has tiny `self` (its own glue) but large `total` (the whole frame). For a leaf stage
+  the two are equal; for a wrapper, read `total`.
+* *Whole-frame cost lives in `total`.* The `mean`/`p99` columns are *self* time, so they do not
+  show a wrapper's end-to-end cost. To baseline a full frame, read `render!`'s `total(ms)`
+  divided by its `nCalls`; the per-stage `self%` rows then tell you where inside that frame the
+  time went (typically paint/layout — `row-ops`, `put-str`, `vbox` — not the ANSI serialization).
+
+== Measuring in the REPL or a test
+
+You can scope a measurement around any call. The property must still be set *when the namespaces
+were loaded*, so start the REPL/bb process with it:
+
+[source,clojure]
+-----
+(require '[com.fulcrologic.fulcro.tui.perf :as perf]
+         '[com.fulcrologic.fulcro.tui.application :as app])
+
+;; Bracket one call: prints a report, returns the body value.
+(perf/profile {} (app/render! app))
+
+;; …or drive it by hand:
+(perf/start!)                       ; enable + reset
+(dotimes [_ 100] (app/render! app))
+(perf/report)                       ; print the table
+(perf/stop!)                        ; disable
+-----
+
+`perf/snapshot` returns the raw stats map (id -> aggregate) if you want to assert on it
+programmatically (e.g. in a test).
+
+== Instrumenting your own code
+
+Wrap any expression in `perf/p` with an id (a keyword or a syntax-quoted symbol):
+
+[source,clojure]
+-----
+(require '[com.fulcrologic.fulcro.tui.perf :as perf :refer [p]])
+
+(p :my/expensive-step
+  (do-expensive-thing ...))
+-----
+
+It records both inclusive and self (exclusive of nested `p`) time, so it is safe to wrap
+recursive code. Like the built-in points it is compile-time gated, so it costs nothing in a
+build that did not set `fulcro.tui.perf`.
+
+NOTE: `perf` also provides a babashka-safe, optionally TTL-expiring memoizer (`perf/cache` /
+`perf/memoize`) used by the layout caches — unrelated to profiling, but it lives in the same
+namespace because it, too, had to be reimplemented to run under SCI.
+
 = Testing / Headless
 
 The library is built to be exercised without a real terminal: a fake terminal plus a
@@ -874,7 +980,7 @@ This mirrors the library's own `application-spec`. A root with a single input:
   (elements/vbox {:id "root"}
     (elements/input {:id        :a
                      :value     a
-                     :on-change (fn [v _caret] (elements/transact! this [(set-a {:v v})]))})))
+                     :on-change (fn [v _caret] (comp/transact! this [(set-a {:v v})]))})))
 
 (deftest typing-updates-state-screen-and-caret
   (let [app (app/application {:root-class Root})        ; :initial-state on by default
@@ -912,14 +1018,14 @@ input loop. They are the most complete worked reference.
 
 = Reference: Namespaces at a glance
 
-The library is five namespaces under `com.fulcrologic.fulcro.tui.*`:
+The library is six namespaces under `com.fulcrologic.fulcro.tui.*`:
 
 [cols="2,3"]
 |===
 | Namespace | Role
 
 | `com.fulcrologic.fulcro.tui.elements` (`elements`)
-| Element generators (`element`, `vbox`, `hbox`, `box`, `text`, `input`, `button`, `line`, `viewport`, `modal`, `picker`), plus `focused?` and `transact!`.
+| Element generators (`element`, `vbox`, `hbox`, `box`, `text`, `input`, `button`, `line`, `viewport`, `modal`, `picker`), plus `focused?`. State changes use Fulcro's own `comp/transact!` — there is no TUI-specific transact.
 
 | `com.fulcrologic.fulcro.tui.engine` (`engine`)
 | The node model, walker, layout, paint, and diff. Defines the node vocabulary (`::engine/tag`/`attrs`/`children`/`node`), `node?`, node accessors, the render pipeline (`render-tree`/`render-root`/`render-buffer`/`screen`), focus & scroll state (`focus!`, `current-focus`, `focus-order`, `focusables`, `get-caret`, `viewport-scroll`, `*current-focus*`), and helpers (`string-width`, `palette`, `key-chord`).
@@ -932,6 +1038,9 @@ The library is five namespaces under `com.fulcrologic.fulcro.tui.*`:
 
 | `com.fulcrologic.fulcro.tui.inspect` (`tui-inspect`)
 | Debug-only Fulcro Inspect connector (`add-inspect!`, `install!`, `enable!`). Ships in `src/main` but is loaded lazily, only when inspect is enabled.
+
+| `com.fulcrologic.fulcro.tui.perf` (`perf`)
+| Built-in, babashka-safe profiler (`p`, `profile`, `start!`/`stop!`/`report`, `snapshot`) — compile-time gated on the `fulcro.tui.perf` property, so zero overhead when off. Also a bb-safe memoizer (`cache`/`memoize`). See <<_measuring_performance,Measuring performance>>.
 |===
 
 == Dependency direction
@@ -939,8 +1048,10 @@ The library is five namespaces under `com.fulcrologic.fulcro.tui.*`:
 The namespaces form an acyclic graph:
 
 * `elements` → `engine`
-* `application` → `engine` + `elements` + `terminal`
-* `terminal` — standalone (no dependency on the others)
+* `application` → `engine` + `elements` + `terminal` (+ `perf`)
+* `engine` → `perf`
+* `terminal` → `perf`
+* `perf` — standalone (no dependency on the others)
 * `inspect` — loaded lazily by `application` only when inspect is enabled
 
 [#demo-source]

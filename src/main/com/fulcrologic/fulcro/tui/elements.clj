@@ -1,7 +1,8 @@
 (ns com.fulcrologic.fulcro.tui.elements
   "The public TUI element API: the generators authors use to build a tree of terminal-native *nodes*
    from a Fulcro component's render — `vbox`, `hbox`, `box`, `text`, `input`, `button`, `line`,
-   `viewport`, `modal`, `picker` — plus `focused?` (highlight the focused node) and `transact!`.
+   `viewport`, `modal`, `picker` — plus `focused?` (highlight the focused node). State changes use
+   Fulcro's own `com.fulcrologic.fulcro.components/transact!`; this namespace adds no transact.
 
    A node is a plain map keyed by the `com.fulcrologic.fulcro.tui.engine` vocabulary (`::engine/tag`,
    `::engine/attrs`, `::engine/children`); prefer these generators over building the maps by hand.

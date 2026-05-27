@@ -58,6 +58,10 @@ Controls:
 * *Pick a fruit* opens a modal list picker (see below): *Up* / *Down* move the highlight, *Enter* chooses, *Escape* cancels.
 * *Ctrl-Q* quits.
 
+TIP: To profile the render/I/O pipeline, launch with the `fulcro.tui.perf` system property set
+(`bb -Dfulcro.tui.perf=1 tui` or `clojure -J-Dfulcro.tui.perf=1 -M:tui`); the session is profiled
+and a self-time report prints after you quit. See the Guide's _Measuring performance_ section.
+
 == Overlays: modal and picker
 
 A `tui/modal` node is an overlay window that floats over the rest of the UI. The driver composites it
