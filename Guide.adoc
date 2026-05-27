@@ -139,12 +139,8 @@ Controls: *Tab* / *Shift-Tab* move focus, type to edit the focused field, *Enter
 *Ctrl-Q* quits.
 
 The full demo source is the best reference for "real" usage and is referenced
-throughout this guide:
-
-[source,clojure]
------
-include::src/tui-example/tui_example/form.clj[]
------
+throughout this guide. It is reproduced in full in
+<<demo-source,Appendix: The complete demo source>>.
 
 = The Node Model & Element Generators
 
@@ -658,7 +654,7 @@ does not compose, so prefer the recommended form as soon as you have child
 components.
 
 NOTE: The bundled demo *no longer* uses this form — it was switched to declared
-`:initial-state` on the Root. The `include::`d demo source above shows the
+`:initial-state` on the Root (see <<demo-source,the appendix>>), which shows the
 canonical pattern.
 
 [source,clojure]
@@ -946,3 +942,17 @@ The namespaces form an acyclic graph:
 * `application` → `engine` + `elements` + `terminal`
 * `terminal` — standalone (no dependency on the others)
 * `inspect` — loaded lazily by `application` only when inspect is enabled
+
+[#demo-source]
+[appendix]
+= The complete demo source
+
+The complete, runnable demo lives at `src/tui-example/tui_example/form.clj`. It is a
+two-field form with a multiline notes area, a Save button, a scrolling list, a
+confirmation modal, and a fruit picker — exercising most of the library in one place.
+Run it with `clojure -M:tui -m tui-example.form` (or `bb run tui`).
+
+[source,clojure]
+-----
+include::src/tui-example/tui_example/form.clj[]
+-----
