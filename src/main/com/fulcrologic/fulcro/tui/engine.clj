@@ -24,6 +24,7 @@
     [com.fulcrologic.fulcro.components :as comp]
     [com.fulcrologic.fulcro.raw.application :as rapp]
     [com.fulcrologic.fulcro.raw.components :as rc]
+    [com.fulcrologic.fulcro.tui.perf :as perf :refer [p]]
     [com.fulcrologic.guardrails.core :refer [=> >def >defn >defn- ?]]))
 
 ;; ============================================================================
@@ -143,6 +144,17 @@ line."
                 (into out (butlast pieces))))))
         (conj out line)))))
 
+(def ^:private wrap-text-impl
+  "Memoized worker for `wrap-text`. Word-wraps string `s` to `width` columns.
+
+Memoized by `[s width]` value with a 5s TTL: wrapping is pure and is performed both during the
+measure pass (`wrapped-line-count`) and the paint pass, so the same (string, width) is wrapped more
+than once per frame. The TTL bounds memory as displayed text changes; `perf/cache` keeps it
+babashka-safe."
+  (perf/cache {:ttl-ms 5000 :gc-every 1000}
+    (fn [s width]
+      (into [] (mapcat #(wrap-segment % width)) (str/split (str s) #"\n" -1)))))
+
 (>defn wrap-text
   "Returns a vector of visual-line strings produced by word-wrapping string `s` to `width` display
 columns. `s` is first split on hard newlines (`\\n`), then each segment is greedily word-wrapped
@@ -160,7 +172,7 @@ Conventions:
   break, but spaces are otherwise preserved within a line."
   [s width]
   [string? int? => (s/coll-of string? :kind vector?)]
-  (into [] (mapcat #(wrap-segment % width)) (str/split (str s) #"\n" -1)))
+  (p `wrap-text (wrap-text-impl s width)))
 
 ;; ============================================================================
 ;; Layout — measure pass (intrinsic sizes)
@@ -238,18 +250,40 @@ one line."
               {:w (+ iw (reduce + 0 (map :w sizes)))
                :h (+ ih (apply max 0 (map :h sizes)))}))))
 
+(def ^:private intrinsic-size-impl
+  "Memoized worker for `intrinsic-size`. Computes the intrinsic size of an UNPLACED `node` from its
+content size and own `:width`/`:height`/`:min-*` overrides.
+
+Memoized by node VALUE with a 5s TTL: `intrinsic-size` is pure on its (unplaced) node arg, and a
+single render measures the same node instances repeatedly — directly (a parent's `distribute-main`
+asks each child) and transitively (`content-size`→`child-size` recurses the whole subtree, and each
+descendant container then re-measures its own subtree during `place`). Because `child-size` calls
+the `intrinsic-size` var, every recursive level routes back through this cache, so a parent reuses
+the sizes its descendants computed moments earlier (collapsing the O(n·depth) re-measure to O(n)).
+
+The TTL bounds memory: entries for node maps that no longer appear (the UI changed) expire instead
+of leaking. Caching forever would retain stale node values across every frame. `:gc-every 1000`
+sweeps expired entries roughly once per 1000 calls. Built on `perf/cache` (atom + delay), so it is
+babashka-safe (no arrays/interop)."
+  (perf/cache {:ttl-ms 5000 :gc-every 1000}
+    (fn [node]
+      (let [{:keys [width height min-width min-height]} (::attrs node)
+            {:keys [w h]} (content-size node)]
+        {:w (max (if (number? width) width w) (long (or min-width 0)))
+         :h (max (if (number? height) height h) (long (or min-height 0)))}))))
+
 (>defn intrinsic-size
   "Returns the intrinsic `{:w :h}` of `node` in terminal cells. The content size (text length,
 stacked/abutted children, plus any `:border?`/`:padding` insets) is overridden by the node's own
 fixed `:width`/`:height` when those are integers, and then floored by `:min-width`/`:min-height`.
 Fraction and `:grow` sizing are not resolved here — they require a concrete parent rectangle and
-are handled by the place pass."
+are handled by the place pass.
+
+The result is memoized by node value (see `intrinsic-size-impl`); this is the public, transparent
+entry point and is what `child-size` recurses through, so every subtree level hits the cache."
   [node]
   [::node => ::size]
-  (let [{:keys [width height min-width min-height]} (::attrs node)
-        {:keys [w h]} (content-size node)]
-    {:w (max (if (number? width) width w) (long (or min-width 0)))
-     :h (max (if (number? height) height h) (long (or min-height 0)))}))
+  (intrinsic-size-impl node))
 
 ;; ============================================================================
 ;; Layout — place pass (rect assignment)
@@ -404,33 +438,34 @@ rather than absolute screen coordinates. The placed virtual child subtree is sto
 `::children` are also placed (in virtual coords) so generic walkers still see them."
   [node rect]
   [::node ::rect => (s/keys :req [::tag ::attrs ::rect ::children])]
-  (let [{::keys [tag attrs children]} node
-        {:keys [l r t b]} (edge-insets attrs)
-        content {:x (+ (:x rect) l)
-                 :y (+ (:y rect) t)
-                 :w (max 0 (- (:w rect) l r))
-                 :h (max 0 (- (:h rect) t b))}]
-    (case tag
-      (:vbox :modal) (assoc node ::rect rect ::children (place-stack :v content (mapv as-node children)))
-      :hbox (assoc node ::rect rect ::children (place-stack :h content (mapv as-node children)))
-      :viewport
-      (let [child        (as-node (first children))
-            ;; A wrapping text inside a viewport wraps to the viewport's content width, so its
-            ;; natural (virtual) height is its wrapped line count at that width rather than 1.
-            natural-h    (if (wrapping-text? child)
-                           (wrapped-line-count child (:w content))
-                           (:h (intrinsic-size child)))
-            virtual-h    (max (:h content) natural-h)
-            virtual      {:x 0 :y 0 :w (:w content) :h virtual-h}
-            placed-child (place child virtual)]
-        (assoc node
-          ::rect rect
-          ::children [placed-child]
-          ::viewport-content placed-child
-          ::virtual-size {:w (:w content) :h virtual-h}
-          ::scroll {:x 0 :y 0}))
-      :box (assoc node ::rect rect ::children (mapv #(place (as-node %) content) children))
-      (assoc node ::rect rect ::children children))))
+  (p ::place
+    (let [{::keys [tag attrs children]} node
+          {:keys [l r t b]} (edge-insets attrs)
+          content {:x (+ (:x rect) l)
+                   :y (+ (:y rect) t)
+                   :w (max 0 (- (:w rect) l r))
+                   :h (max 0 (- (:h rect) t b))}]
+      (case tag
+        (:vbox :modal) (assoc node ::rect rect ::children (place-stack :v content (mapv as-node children)))
+        :hbox (assoc node ::rect rect ::children (place-stack :h content (mapv as-node children)))
+        :viewport
+        (let [child        (as-node (first children))
+              ;; A wrapping text inside a viewport wraps to the viewport's content width, so its
+              ;; natural (virtual) height is its wrapped line count at that width rather than 1.
+              natural-h    (if (wrapping-text? child)
+                             (wrapped-line-count child (:w content))
+                             (:h (intrinsic-size child)))
+              virtual-h    (max (:h content) natural-h)
+              virtual      {:x 0 :y 0 :w (:w content) :h virtual-h}
+              placed-child (place child virtual)]
+          (assoc node
+            ::rect rect
+            ::children [placed-child]
+            ::viewport-content placed-child
+            ::virtual-size {:w (:w content) :h virtual-h}
+            ::scroll {:x 0 :y 0}))
+        :box (assoc node ::rect rect ::children (mapv #(place (as-node %) content) children))
+        (assoc node ::rect rect ::children children)))))
 
 ;; ============================================================================
 ;; Render — cell buffer
@@ -490,15 +525,8 @@ Writes that fall outside the buffer bounds are ignored (clipped), returning the 
     (< x (+ (:x clip) (:w clip)))
     (< y (+ (:y clip) (:h clip)))))
 
-(>defn put-str
-  "Returns `buffer` with string `s` written starting at 0-based column `x`, row `y`, advancing by each
-character's display width and styling each written cell with `style`. Writes are clipped to both
-the `clip-rect` `{:x :y :w :h}` and the buffer bounds.
-
-Wide-char cell scheme: a 2-column character is written into its starting cell and a continuation
-marker (a space with the same `style`) is written into the next cell. The `screen` helper drops
-these continuation cells so screen strings read naturally. A wide char is written only if BOTH its
-cells pass the clip/bounds test, so a wide char is never split across a clip boundary."
+(>defn- put-str*
+  "Writes string `s` into `buffer` starting at `x`,`y`; implementation for `put-str`."
   [buffer x y s style clip-rect]
   [::buffer int? int? string? ::style ::rect => ::buffer]
   (loop [buf buffer
@@ -520,6 +548,19 @@ cells pass the clip/bounds test, so a wide char is never split across a clip bou
                   (recur (put-cell buf col y (char cp) style) (inc col) (rest cps))
                   (recur buf (inc col) (rest cps)))))
       buf)))
+
+(>defn put-str
+  "Returns `buffer` with string `s` written starting at 0-based column `x`, row `y`, advancing by each
+character's display width and styling each written cell with `style`. Writes are clipped to both
+the `clip-rect` `{:x :y :w :h}` and the buffer bounds.
+
+Wide-char cell scheme: a 2-column character is written into its starting cell and a continuation
+marker (a space with the same `style`) is written into the next cell. The `screen` helper drops
+these continuation cells so screen strings read naturally. A wide char is written only if BOTH its
+cells pass the clip/bounds test, so a wide char is never split across a clip boundary."
+  [buffer x y s style clip-rect]
+  [::buffer int? int? string? ::style ::rect => ::buffer]
+  (p `put-str (put-str* buffer x y s style clip-rect)))
 
 ;; ============================================================================
 ;; Render — color palette + SGR
@@ -659,7 +700,12 @@ rect). Cells read from outside `src`'s bounds are skipped. Pure."
 (declare wrap-layout)
 (declare multiline-input?)
 
-(>defn- paint-node
+(defn- paint-id
+  "Returns the perf id for painting a node of `tag`, e.g. `:paint/text`."
+  [tag]
+  (keyword "paint" (name tag)))
+
+(>defn- paint-node*
   "Returns `buffer` after painting placed `node` and its descendants, clipping every write to `clip`
 (the intersection of ancestor rects). Containers draw their border/background then recurse; leaves
 write their text/value/rule into their content rect."
@@ -739,6 +785,14 @@ write their text/value/rule into their content rect."
       (let [buf (if (seq style) (fill-rect buffer cr style content-clip) buffer)
             buf (if (:border? attrs) (draw-border buf rect style node-clip) buf)]
         (reduce (fn [b child] (paint b child node-clip)) buf children)))))
+
+(>defn- paint-node
+  "Profiling wrapper for `paint-node*`: records per-tag paint time (self-time excludes nested child
+   paints, which are themselves wrapped) under a `:paint/<tag>` id, then delegates."
+  [buffer node clip]
+  [::buffer ::node ::rect => ::buffer]
+  (p (paint-id (::tag node))
+    (paint-node* buffer node clip)))
 
 (>defn paint
   "Returns `buffer` after painting placed `node` (and its descendants) into it, clipping all writes to
@@ -831,7 +885,8 @@ style are coalesced into one op; on a full repaint every non-default cell is emi
 coalesced)."
   [row cols next-cells prev-cells]
   [nat-int? nat-int? ::cells (? ::cells) => ::ops]
-  (let [start (* row cols)]
+  (p `row-ops
+   (let [start (* row cols)]
     (loop [col 0, run nil, out []]
       (let [flush (fn [out run] (if run (conj out run) out))]
         (if (< col cols)
@@ -849,7 +904,7 @@ coalesced)."
                   {:row row :col col :sgr codes :text (str (:ch cell))}
                   (flush out run)))
               (recur (inc col) nil (flush out run))))
-          (flush out run))))))
+          (flush out run)))))))
 
 (>defn diff
   "Returns a vector of run ops describing how to turn buffer `prev` into buffer `next`. Each op is
@@ -859,18 +914,16 @@ different dimensions than `next`, a full repaint is emitted (every non-default c
 coalesced per row)."
   [prev next]
   [(? ::buffer) ::buffer => ::ops]
-  (let [{:keys [rows cols cells]} next
-        full?      (or (nil? prev) (not (same-dims? prev next)))
-        prev-cells (when-not full? (:cells prev))]
-    (into []
-      (mapcat (fn [row] (row-ops row cols cells prev-cells)))
-      (range rows))))
+  (p `diff
+    (let [{:keys [rows cols cells]} next
+          full?      (or (nil? prev) (not (same-dims? prev next)))
+          prev-cells (when-not full? (:cells prev))]
+      (into []
+        (mapcat (fn [row] (row-ops row cols cells prev-cells)))
+        (range rows)))))
 
-(>defn ops->ansi
-  "Returns a single ANSI string that applies the run `ops` to a terminal. Each op emits a cursor move
-`\"\\u001b[<row+1>;<col+1>H\"`, an SGR sequence only when the pen style changes from the previous
-op, then the op's text. A trailing reset (`\"\\u001b[0m\"`) is emitted when the final pen style is
-non-default."
+(>defn- ops->ansi*
+  "Serializes run `ops` to a single ANSI string; see `ops->ansi` for the full contract."
   [ops]
   [::ops => string?]
   (let [{:keys [out pen]}
@@ -891,6 +944,15 @@ non-default."
           {:out "" :pen []}
           ops)]
     (if (seq pen) (str out (sgr-string [])) out)))
+
+(>defn ops->ansi
+  "Returns a single ANSI string that applies the run `ops` to a terminal. Each op emits a cursor move
+`\"\\u001b[<row+1>;<col+1>H\"`, an SGR sequence only when the pen style changes from the previous
+op, then the op's text. A trailing reset (`\"\\u001b[0m\"`) is emitted when the final pen style is
+non-default."
+  [ops]
+  [::ops => string?]
+  (p `ops->ansi (ops->ansi* ops)))
 
 (>defn frame->ansi
   "Returns the ANSI string to render the transition from buffer `prev` to buffer `next`, by diffing
@@ -985,25 +1047,26 @@ When the render of a component yields several siblings, this returns a vector of
 nodes; otherwise it returns a single node (or scalar)."
   [x]
   [any? => any?]
-  (cond
-    (nil? x) nil
+  (p ::render-tree
+    (cond
+      (nil? x) nil
 
-    (node? x)
-    (assoc x ::children (render-children (::children x)))
+      (node? x)
+      (assoc x ::children (render-children (::children x)))
 
-    (rc/component-instance? x)
-    (binding [comp/*parent* x]
-      (let [output (render-instance x)]
-        (cond
-          (nil? output) nil
-          (vector? output) (render-children output)
-          :else (render-tree output))))
+      (rc/component-instance? x)
+      (binding [comp/*parent* x]
+        (let [output (render-instance x)]
+          (cond
+            (nil? output) nil
+            (vector? output) (render-children output)
+            :else (render-tree output))))
 
-    (or (string? x) (number? x)) x
+      (or (string? x) (number? x)) x
 
-    (sequential? x) (render-children x)
+      (sequential? x) (render-children x)
 
-    :else x))
+      :else x)))
 
 (>defn render-root
   "Returns the pure TUI node tree for a root component `class` given its `props` tree.
@@ -1295,22 +1358,23 @@ or `:button`, or it carries any of the focus-relevant handler attributes
 (default 0) and `:dfs` is the node's pre-order index among all visited nodes."
   [node-tree]
   [any? => vector?]
-  (let [out (volatile! (transient []))
-        idx (volatile! 0)]
-    (letfn [(walk [x]
-              (when (node? x)
-                (let [dfs @idx]
-                  (vswap! idx inc)
-                  (when (focusable-node? x)
-                    (vswap! out conj!
-                      {:id       (node-attr x :id)
-                       :priority (long (or (node-attr x :priority) 0))
-                       :dfs      dfs
-                       :node     x}))
-                  (doseq [c (::children x)]
-                    (walk c)))))]
-      (walk node-tree))
-    (persistent! @out)))
+  (p ::focusables
+    (let [out (volatile! (transient []))
+          idx (volatile! 0)]
+      (letfn [(walk [x]
+                (when (node? x)
+                  (let [dfs @idx]
+                    (vswap! idx inc)
+                    (when (focusable-node? x)
+                      (vswap! out conj!
+                        {:id       (node-attr x :id)
+                         :priority (long (or (node-attr x :priority) 0))
+                         :dfs      dfs
+                         :node     x}))
+                    (doseq [c (::children x)]
+                      (walk c)))))]
+        (walk node-tree))
+      (persistent! @out))))
 
 (>defn focus-order
   "Returns `focusables` sorted into focus-traversal order: by `:priority`
@@ -1400,29 +1464,30 @@ they live in the gap between one row's `:start + :len` and the next row's `:star
 `wrap-text` so the rows match what `paint` displays."
   [value width]
   [string? int? => ::wrap-layout]
-  (let [v    (str value)
-        segs (str/split v #"\n" -1)]
-    (loop [segs segs, base 0, out []]
-      (if (seq segs)
-        (let [seg     (first segs)
-              lines   (wrap-text seg width)
-              entries (loop [lines lines, pos 0, es []]
-                        (if (seq lines)
-                          (let [ln    (first lines)
-                                llen  (count ln)
-                                start (+ base pos)
-                                after (+ pos llen)
-                                ;; a soft break dropped the run of spaces between this row and the
-                                ;; next; skip them so the next row starts at the right caret index.
-                                skip  (if (next lines)
-                                        (count (take-while #(= \space %) (subs seg after)))
-                                        0)]
-                            (recur (rest lines) (+ after skip)
-                              (conj es {:start start :len llen :text ln})))
-                          es))]
-          ;; +1 for the hard newline that separated this segment from the next.
-          (recur (rest segs) (+ base (count seg) 1) (into out entries)))
-        out))))
+  (p ::wrap-layout
+    (let [v    (str value)
+          segs (str/split v #"\n" -1)]
+      (loop [segs segs, base 0, out []]
+        (if (seq segs)
+          (let [seg     (first segs)
+                lines   (wrap-text seg width)
+                entries (loop [lines lines, pos 0, es []]
+                          (if (seq lines)
+                            (let [ln    (first lines)
+                                  llen  (count ln)
+                                  start (+ base pos)
+                                  after (+ pos llen)
+                                  ;; a soft break dropped the run of spaces between this row and the
+                                  ;; next; skip them so the next row starts at the right caret index.
+                                  skip  (if (next lines)
+                                          (count (take-while #(= \space %) (subs seg after)))
+                                          0)]
+                              (recur (rest lines) (+ after skip)
+                                (conj es {:start start :len llen :text ln})))
+                            es))]
+            ;; +1 for the hard newline that separated this segment from the next.
+            (recur (rest segs) (+ base (count seg) 1) (into out entries)))
+          out)))))
 
 (>defn caret->rowcol
   "Returns the visual `[row col]` of caret index `caret` within the layout of `value` wrapped to
@@ -1655,28 +1720,29 @@ Single-line vs multiline (`:multiline? true`):
 Returns `app`."
   [app input-node key-event]
   [any? ::node map? => any?]
-  (let [id              (node-attr input-node :id)
-        value           (str (node-attr input-node :value))
-        caret-in-state? (some? (node-attr input-node :caret))
-        multiline?      (multiline-input? input-node)]
-    (if (and (not multiline?) (= :enter (:key key-event)))
-      (do
-        (when-let [submit (node-attr input-node :on-submit)]
-          (submit value))
-        app)
-      (let [caret (if caret-in-state?
-                    (long (node-attr input-node :caret))
-                    (get-caret app id (count value)))
-            width (when multiline?
-                    (input-width app id (long (or (node-attr input-node :width) 1000000))))
-            {new-value :value new-caret :caret} (if multiline?
-                                                  (apply-edit-multiline value caret width key-event)
-                                                  (apply-edit value caret key-event))]
-        (when-let [on-change (node-attr input-node :on-change)]
-          (on-change new-value new-caret))
-        (when-not caret-in-state?
-          (set-caret! app id new-caret))
-        app))))
+  (p ::handle-input-key!
+    (let [id              (node-attr input-node :id)
+          value           (str (node-attr input-node :value))
+          caret-in-state? (some? (node-attr input-node :caret))
+          multiline?      (multiline-input? input-node)]
+      (if (and (not multiline?) (= :enter (:key key-event)))
+        (do
+          (when-let [submit (node-attr input-node :on-submit)]
+            (submit value))
+          app)
+        (let [caret (if caret-in-state?
+                      (long (node-attr input-node :caret))
+                      (get-caret app id (count value)))
+              width (when multiline?
+                      (input-width app id (long (or (node-attr input-node :width) 1000000))))
+              {new-value :value new-caret :caret} (if multiline?
+                                                    (apply-edit-multiline value caret width key-event)
+                                                    (apply-edit value caret key-event))]
+          (when-let [on-change (node-attr input-node :on-change)]
+            (on-change new-value new-caret))
+          (when-not caret-in-state?
+            (set-caret! app id new-caret))
+          app)))))
 
 ;; ----------------------------------------------------------------------------
 ;; Key routing (bubbling) + global keymap
@@ -1728,22 +1794,23 @@ keymap handler receives `context` and the `key-event`. Returns the truthy handle
 result, or `false` when nothing handled the event."
   [context node-tree focus-id key-event global-keymap]
   [any? any? any? map? (? map?) => any?]
-  (let [path    (node-path node-tree focus-id)
-        ;; nearest (focused) first, then ancestors toward root
-        chain   (reverse path)
-        bubbled (reduce
-                  (fn [_ node]
-                    (when-let [h (node-attr node :on-key)]
-                      (let [r (h key-event)]
-                        (when r (reduced r)))))
-                  nil
-                  chain)]
-    (cond
-      bubbled bubbled
-      (and global-keymap (contains? global-keymap (key-chord key-event)))
-      (let [h (get global-keymap (key-chord key-event))]
-        (or (h context key-event) true))
-      :else false)))
+  (p ::route-key
+    (let [path    (node-path node-tree focus-id)
+          ;; nearest (focused) first, then ancestors toward root
+          chain   (reverse path)
+          bubbled (reduce
+                    (fn [_ node]
+                      (when-let [h (node-attr node :on-key)]
+                        (let [r (h key-event)]
+                          (when r (reduced r)))))
+                    nil
+                    chain)]
+      (cond
+        bubbled bubbled
+        (and global-keymap (contains? global-keymap (key-chord key-event)))
+        (let [h (get global-keymap (key-chord key-event))]
+          (or (h context key-event) true))
+        :else false))))
 
 ;; ----------------------------------------------------------------------------
 ;; Overlays (modal / picker)
@@ -1890,50 +1957,51 @@ terminal size and is handled by a later task."
    (process-key! app key-event nil))
   ([app key-event global-keymap]
    [any? map? (? map?) => any?]
-   (let [;; When an overlay is open, focus and keyboard input are trapped to its subtree (the
-         ;; base UI is inert behind it). `active-tree` is that overlay, or the full tree otherwise.
-         node-tree        (active-tree (current-node-tree app))
-         overlay?         (modal-node? node-tree)
-         k                (:key key-event)
-         shift?           (:shift? key-event)
-         old-id           (current-focus app)
-         order            (focus-order (focusables node-tree))
-         focused-node     (when (some? old-id) (find-by-id node-tree old-id))
-         multiline-input? (and focused-node
-                            (= :input (::tag focused-node))
-                            (true? (node-attr focused-node :multiline?)))
-         nav-down?        (and (= k :down) (not multiline-input?))
-         nav-up?          (and (= k :up) (not multiline-input?))]
-     (cond
-       ;; Escape dismisses the active overlay via its (application-supplied) :on-dismiss handler.
-       (and overlay? (= k :escape) (node-attr node-tree :on-dismiss))
-       ((node-attr node-tree :on-dismiss))
+   (p ::process-key!
+     (let [;; When an overlay is open, focus and keyboard input are trapped to its subtree (the
+           ;; base UI is inert behind it). `active-tree` is that overlay, or the full tree otherwise.
+           node-tree        (active-tree (current-node-tree app))
+           overlay?         (modal-node? node-tree)
+           k                (:key key-event)
+           shift?           (:shift? key-event)
+           old-id           (current-focus app)
+           order            (focus-order (focusables node-tree))
+           focused-node     (when (some? old-id) (find-by-id node-tree old-id))
+           multiline-input? (and focused-node
+                              (= :input (::tag focused-node))
+                              (true? (node-attr focused-node :multiline?)))
+           nav-down?        (and (= k :down) (not multiline-input?))
+           nav-up?          (and (= k :up) (not multiline-input?))]
+       (cond
+         ;; Escape dismisses the active overlay via its (application-supplied) :on-dismiss handler.
+         (and overlay? (= k :escape) (node-attr node-tree :on-dismiss))
+         ((node-attr node-tree :on-dismiss))
 
-       (or (= k :backtab) (and (= k :tab) shift?) nav-up?)
-       (let [new-id (prev-focus order old-id)]
-         (focus! app new-id)
-         (apply-focus-change! app node-tree old-id new-id))
+         (or (= k :backtab) (and (= k :tab) shift?) nav-up?)
+         (let [new-id (prev-focus order old-id)]
+           (focus! app new-id)
+           (apply-focus-change! app node-tree old-id new-id))
 
-       (or (= k :tab) nav-down?)
-       (let [new-id (next-focus order old-id)]
-         (focus! app new-id)
-         (apply-focus-change! app node-tree old-id new-id))
+         (or (= k :tab) nav-down?)
+         (let [new-id (next-focus order old-id)]
+           (focus! app new-id)
+           (apply-focus-change! app node-tree old-id new-id))
 
-       :else
-       (let []
-         (cond
-           (and focused-node (= :input (::tag focused-node)))
-           (handle-input-key! app focused-node key-event)
+         :else
+         (let []
+           (cond
+             (and focused-node (= :input (::tag focused-node)))
+             (handle-input-key! app focused-node key-event)
 
-           ;; Enter or Space on a focusable that has an :on-activate handler activates it.
-           (and focused-node
-             (node-attr focused-node :on-activate)
-             (or (= k :enter) (= (:char key-event) " ")))
-           (activate! focused-node)
+             ;; Enter or Space on a focusable that has an :on-activate handler activates it.
+             (and focused-node
+               (node-attr focused-node :on-activate)
+               (or (= k :enter) (= (:char key-event) " ")))
+             (activate! focused-node)
 
-           :else
-           (route-key app node-tree old-id key-event global-keymap))))
-     ;; re-resolve focus against the post-dispatch active tree (the overlay if one is open, else the
-     ;; full tree). When a modal opens this draws focus into it; when it closes, focus returns to base.
-     (resolve-focus! app (active-tree (current-node-tree app)))
-     app)))
+             :else
+             (route-key app node-tree old-id key-event global-keymap))))
+       ;; re-resolve focus against the post-dispatch active tree (the overlay if one is open, else the
+       ;; full tree). When a modal opens this draws focus into it; when it closes, focus returns to base.
+       (resolve-focus! app (active-tree (current-node-tree app)))
+       app))))

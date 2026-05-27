@@ -189,10 +189,15 @@
               " Cancel ")))))))
 
 (defn -main
-  "Builds the demo app and runs it on the system terminal until Ctrl-Q."
+  "Builds the demo app and runs it on the system terminal until Ctrl-Q.
+
+   To profile the render/I/O/key pipeline, run with the `fulcro.tui.perf` system property set
+   (`clojure -J-Dfulcro.tui.perf=1 ...` or `bb -Dfulcro.tui.perf=1 ...`): `run-blocking!` then
+   profiles the whole session and prints a self-time report after you quit. Exercise the slow
+   paths you care about (scroll the list, type in the notes box, open the picker/modal) before
+   quitting; the top rows by `self%` are where CPU time actually went."
   [& _args]
   ;; `app/application` initializes the db from Root's declared `:initial-state` by default, so no
   ;; manual state-atom reset is needed here.
   (let [app (app/application {:root-class Root})]
-    (app/run-blocking! app {:global-keymap {[:ctrl "q"] (fn [a _e] (app/quit! a))}})
-    (println "Goodbye.")))
+    (app/run-blocking! app {:global-keymap {[:ctrl "q"] (fn [a _e] (app/quit! a))}})))

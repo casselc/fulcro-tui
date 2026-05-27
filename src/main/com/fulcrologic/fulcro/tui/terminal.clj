@@ -8,6 +8,7 @@
    This is JVM/babashka only (plain `.clj`)."
   (:require
     [clojure.spec.alpha :as s]
+    [com.fulcrologic.fulcro.tui.perf :as perf :refer [p]]
     [com.fulcrologic.guardrails.core :refer [=> >def >defn >defn- ?]])
   (:import
     (org.jline.terminal  TerminalBuilder)
@@ -212,14 +213,15 @@ both are incremented."
   (t-size [_]
     {:rows (.getHeight term) :cols (.getWidth term)})
   (t-read-key [_]
-    (read-key-from-reader (.reader term)))
+    (p :io/read-key (read-key-from-reader (.reader term))))
   (t-write! [_ s]
-    (.write (.writer term) ^String s))
+    (p :io/write (.write (.writer term) ^String s)))
   (t-flush! [_]
-    (.flush (.writer term)))
+    (p :io/flush (.flush (.writer term))))
   (t-set-cursor! [this x y visible?]
-    (t-write! this (cursor-position-string x y))
-    (t-write! this (if visible? ansi-cursor-show ansi-cursor-hide)))
+    (p :io/set-cursor
+      (t-write! this (cursor-position-string x y))
+      (t-write! this (if visible? ansi-cursor-show ansi-cursor-hide))))
   (t-enter! [this]
     (.enterRawMode term)
     (t-write! this ansi-alt-screen-enter)

@@ -23,6 +23,36 @@
 ;; ===========================================================================
 {:paths ["src/main" "src/tui-example"]
  :deps  {com.fulcrologic/fulcro {:mvn/version "3.10.0-RC1"}}
- :tasks {tui {:doc      "Run the example TUI form in the current terminal (Ctrl-Q quits)."
-              :requires ([tui-example.form])
-              :task     (tui-example.form/-main)}}}
+ :tasks {tui  {:doc      "Run the example TUI form in the current terminal (Ctrl-Q quits)."
+               :requires ([tui-example.form])
+               :task     (tui-example.form/-main)}
+
+         ;; ---------------------------------------------------------------------
+         ;; Babashka test runner.
+         ;;
+         ;; Runs the project's specs under bb itself, so the bb-target code stays honestly
+         ;; green on bb (not just on the JVM). fulcro-spec >= 3.2.10 loads and runs under bb
+         ;; (earlier versions could not — they required `cljs.test` unconditionally, which SCI
+         ;; rejects; 3.2.10 added `:bb` reader conditionals). The specs run unchanged.
+         ;;
+         ;; `bb-specs` is the set of spec namespaces whose CODE-UNDER-TEST also loads under bb.
+         ;; The whole TUI library is bb-compatible, so this should be every `*-spec` ns; the
+         ;; list is explicit (not glob discovery) so adding a spec that pulls something
+         ;; bb-incompatible fails loudly here instead of silently skipping.
+         ;; ---------------------------------------------------------------------
+         test {:doc         "Run the project specs under babashka (fulcro-spec, same files as the JVM suite)."
+               :extra-paths ["src/test"]
+               :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.10"
+                                                      :exclusions  [com.fulcrologic/fulcro
+                                                                    org.clojure/clojurescript
+                                                                    org.clojure/spec.alpha]}
+                             org.clojure/test.check  {:mvn/version "1.1.1"}}
+               :requires    ([clojure.test :as t])
+               :task        (let [bb-specs '[com.fulcrologic.fulcro.tui.application-spec
+                                             com.fulcrologic.fulcro.tui.elements-spec
+                                             com.fulcrologic.fulcro.tui.engine-spec
+                                             com.fulcrologic.fulcro.tui.terminal-spec
+                                             com.fulcrologic.fulcro.tui.perf-spec]]
+                              (doseq [n bb-specs] (require n))
+                              (let [{:keys [fail error]} (apply t/run-tests bb-specs)]
+                                (System/exit (if (pos? (+ (long fail) (long error))) 1 0))))}}}

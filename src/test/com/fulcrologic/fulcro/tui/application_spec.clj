@@ -83,9 +83,9 @@
 
 ;; ---------------------------------------------------------------------------
 
-(specification {:covers {`app/application      "203757,f93470"
-                         `app/attach!          "7acff7,712c35"
-                         `app/render!          "835cc1,9c4e36"
+(specification {:covers {`app/application      "06713e,452305"
+                         `app/attach!          "d47881,3c1a9f"
+                         `app/render!          "971320,b78264"
                          `app/screen-of        "0ca459,662c58"
                          `app/screen-styled-of "3815eb,5083b1"
                          `app/terminal         "18f70c,089ec1"}} "application / attach! (initial paint)"
@@ -111,7 +111,7 @@
         "the hardware cursor is shown at input :a's caret origin (0,0)"
         (term/cursor t) => {:x 0 :y 0 :visible? true}))))
 
-(specification {:covers {`app/step! "3bef92,e3f20e"}} "step! — focus, typing, and activation"
+(specification {:covers {`app/step! "6b509b,85f1d7"}} "step! — focus, typing, and activation"
   (component "Tab moves focus and follows the cursor to the newly focused input"
     (let [app (new-app)
           t   (term/string-terminal {:rows 10 :cols 30})]
@@ -155,8 +155,8 @@
         "the repaint shows the button's updated label"
         (nth (app/screen-of app) 2) => "DONE                          "))))
 
-(specification {:covers {`app/render!          "835cc1,9c4e36"
-                         `app/too-small-buffer "6bd38f,f40ebc"}} "render! — diff path & resize"
+(specification {:covers {`app/render!          "971320,b78264"
+                         `app/too-small-buffer "6bd38f,3595f6"}} "render! — diff path & resize"
   (component "a no-op re-render produces no terminal output"
     (let [app (new-app)
           t   (term/string-terminal {:rows 10 :cols 30})]
@@ -197,8 +197,8 @@
           (str/includes? (first scr) "too small") => true
           (str/includes? (first scr) "10x5") => true)))))
 
-(specification {:covers {`app/step!         "3bef92,e3f20e"
-                         `app/follow-focus! "f2b69d,259142"}} "viewport scrolling, follow-focus, and cursor tracking"
+(specification {:covers {`app/step!         "6b509b,85f1d7"
+                         `app/follow-focus! "f2b69d,09b8da"}} "viewport scrolling, follow-focus, and cursor tracking"
   (component "Tab into the list auto-scrolls the viewport so the focused item stays visible"
     (let [app (new-vp-app)
           t   (term/string-terminal {:rows 8 :cols 12})]
@@ -326,8 +326,8 @@
         "scrolling back up reveals the first wrapped row again"
         (first (app/screen-of app)) => "the quick   "))))
 
-(specification {:covers {`app/mount!        "8b44a7,9fe936"
-                         `app/run-blocking! "a8159d,32ca36"
+(specification {:covers {`app/mount!        "ed423c,4515ad"
+                         `app/run-blocking! "a55d6c,315f6c"
                          `app/quit!         "aa6cd2,a354d9"}} "mount! / run! — input loop"
   (component "run! with a finite key script processes the keys and ends, leaving the terminal"
     (let [app (new-app)
@@ -400,8 +400,8 @@
 (defn- new-picker-app []
   (app/application {:root-class PickerRoot :initial-state true}))
 
-(specification {:covers {`app/render! "835cc1,9c4e36"
-                         `app/step!   "3bef92,e3f20e"}} "overlay compositing & focus trap"
+(specification {:covers {`app/render! "971320,b78264"
+                         `app/step!   "6b509b,85f1d7"}} "overlay compositing & focus trap"
   (component "while the picker is closed only the base UI is focusable and painted"
     (let [app (new-picker-app)
           t   (term/string-terminal {:rows 10 :cols 24})]
@@ -452,8 +452,8 @@
           "the base UI paints un-obscured again (no modal border on screen)"
           (str/includes? (apply str scr) "Fruit") => false)))))
 
-(specification {:covers {`app/step!         "3bef92,e3f20e"
-                         `app/follow-focus! "f2b69d,259142"}} "picker scrolling and selection"
+(specification {:covers {`app/step!         "6b509b,85f1d7"
+                         `app/follow-focus! "f2b69d,09b8da"}} "picker scrolling and selection"
   (component "arrowing down past the visible rows auto-scrolls the picker's viewport"
     (let [app (new-picker-app)
           t   (term/string-terminal {:rows 10 :cols 24})]
@@ -491,7 +491,7 @@
 ;; Entrypoint niceties: start!, app-level global-keymap, lifecycle (C1/C2).
 ;; ---------------------------------------------------------------------------
 
-(specification {:covers {`app/start! "f91686,291564"}} "start! — build + run in one call"
+(specification {:covers {`app/start! "f91686,043084"}} "start! — build + run in one call"
   (component "start! builds the app (application) and runs it to completion (run-blocking!)"
     (let [t      (term/string-terminal {:rows 10 :cols 30
                                         :keys [{:key "H" :char "H"}
@@ -550,3 +550,41 @@
         @fired => true
         "the loop stopped and left the terminal"
         (:left? @(.-state t)) => true))))
+
+(specification {:covers {`app/request-render! "efc530,f2264c"}} "request-render! — throttle + coalescing"
+  (let [runtime-key :com.fulcrologic.fulcro.application/runtime-atom]
+    (component "throttling disabled (default) renders synchronously, one render per request"
+      (let [app    (new-app)
+            t      (term/string-terminal {:rows 10 :cols 30})
+            _      (app/attach! app t)                       ; one initial render
+            calls  (atom 0)]
+        (with-redefs [app/render! (fn [a] (swap! calls inc) a)]
+          (dotimes [_ 5] (app/request-render! app)))
+        (assertions
+          "every request rendered synchronously (no throttle keys installed)"
+          @calls => 5)))
+
+    (component "throttling enabled coalesces a burst into fewer renders with a trailing render"
+      (let [app    (new-app)
+            t      (term/string-terminal {:rows 10 :cols 30})
+            _      (app/attach! app t)
+            calls  (atom 0)]
+        ;; Install a live-path throttle directly on the runtime atom (mount! does this from :max-fps).
+        (swap! (get app runtime-key) assoc
+          :com.fulcrologic.fulcro.tui.application/render-throttle-ms 50
+          :com.fulcrologic.fulcro.tui.application/last-render-ns (atom 0)
+          :com.fulcrologic.fulcro.tui.application/render-scheduled? (atom false))
+        (with-redefs [app/render! (fn [a] (swap! calls inc) a)]
+          ;; last-render-ns starts at 0 so the FIRST request renders immediately (leading edge),
+          ;; the rest fall inside the window and coalesce into ONE scheduled trailing render.
+          (dotimes [_ 20] (app/request-render! app))
+          (let [during @calls]
+            ;; let the trailing daemon fire (window is 50ms; sleep well past it)
+            (Thread/sleep 120)
+            (assertions
+              "a burst of 20 produced far fewer than 20 renders (leading edge only, mid-burst)"
+              (< during 20) => true
+              "the leading edge rendered at least once immediately"
+              (pos? during) => true
+              "exactly one extra trailing render fired after the window"
+              (- @calls during) => 1)))))))

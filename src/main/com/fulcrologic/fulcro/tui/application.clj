@@ -33,6 +33,7 @@
     [com.fulcrologic.fulcro.raw.components :as rc]
     [com.fulcrologic.fulcro.tui.elements :as elements]
     [com.fulcrologic.fulcro.tui.engine :as engine]
+    [com.fulcrologic.fulcro.tui.perf :as perf :refer [p]]
     [com.fulcrologic.fulcro.tui.terminal :as term]
     [com.fulcrologic.guardrails.core :refer [=> >def >defn >defn- ?]]))
 
@@ -46,6 +47,9 @@
 (>def ::last-size (? map?))
 (>def ::handle map?)
 (>def ::global-keymap (? map?))
+(>def ::render-throttle-ms int?)
+(>def ::last-render-ns (? any?))                            ; atom holding the last render time in ns
+(>def ::render-scheduled? (? any?))                         ; atom<boolean> guarding a single trailing render
 (>def ::min-size (s/keys :req-un [::min-width ::min-height]))
 (>def ::min-width int?)
 (>def ::min-height int?)
@@ -193,31 +197,32 @@ stays visible, and assocs it under `::engine/text-scroll`.
 Walks the placed tree (including nested viewport content)."
   [app tree]
   [any? any? => any?]
-  (letfn [(walk [x]
-            (if (engine/node? x)
-              (let [x (cond
-                        (engine/viewport? x)
-                        (let [id     (engine/node-attr x :id)
-                              scroll (if (some? id) (engine/viewport-scroll app id) (::engine/scroll x))
-                              scroll (engine/clamp-scroll scroll (::engine/virtual-size x) (engine/content-view-size x))]
-                          (assoc x ::engine/scroll scroll))
+  (p ::inject-scroll
+    (letfn [(walk [x]
+              (if (engine/node? x)
+                (let [x (cond
+                          (engine/viewport? x)
+                          (let [id     (engine/node-attr x :id)
+                                scroll (if (some? id) (engine/viewport-scroll app id) (::engine/scroll x))
+                                scroll (engine/clamp-scroll scroll (::engine/virtual-size x) (engine/content-view-size x))]
+                            (assoc x ::engine/scroll scroll))
 
-                        (engine/multiline-input? x)
-                        (let [id    (engine/node-attr x :id)
-                              width (:w (engine/content-view-size x))
-                              value (str (engine/node-attr x :value))
-                              h     (:h (engine/content-view-size x))
-                              caret (if (some? id) (engine/get-caret app id (count value)) (count value))]
-                          (when (some? id) (engine/set-input-width! app id width))
-                          (assoc x ::engine/text-scroll (engine/text-scroll-top value width caret h)))
+                          (engine/multiline-input? x)
+                          (let [id    (engine/node-attr x :id)
+                                width (:w (engine/content-view-size x))
+                                value (str (engine/node-attr x :value))
+                                h     (:h (engine/content-view-size x))
+                                caret (if (some? id) (engine/get-caret app id (count value)) (count value))]
+                            (when (some? id) (engine/set-input-width! app id width))
+                            (assoc x ::engine/text-scroll (engine/text-scroll-top value width caret h)))
 
-                        :else x)
-                    x (update x ::engine/children (fn [cs] (mapv walk cs)))]
-                (if-let [vc (::engine/viewport-content x)]
-                  (assoc x ::engine/viewport-content (walk vc))
-                  x))
-              x))]
-    (walk tree)))
+                          :else x)
+                      x (update x ::engine/children (fn [cs] (mapv walk cs)))]
+                  (if-let [vc (::engine/viewport-content x)]
+                    (assoc x ::engine/viewport-content (walk vc))
+                    x))
+                x))]
+      (walk tree))))
 
 (>defn follow-focus!
   "Adjusts viewport scroll state so the currently focused node stays visible, then returns `app`.
@@ -294,7 +299,7 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
       ;; Serialize renders: the render hook fires on the input thread (via transactions) while the
       ;; terminal's resize handler fires on JLine's signal thread — both call `render!`, and they must
       ;; not interleave their writes to the terminal or the cached prev-buffer/placed-tree.
-      (locking terminal
+      (p `render! (locking terminal
         (let [state-map      (some-> app state-atom-key deref)
               root-class     (root-class-key rt)
               query          (rc/get-query root-class state-map)
@@ -302,8 +307,9 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
               ;; `engine/render-root` binds Fulcro's render-time dynamic vars (comp/*app* etc.)
               ;; itself from the `app` arg; here we only need the TUI-specific focus var so
               ;; `elements/focused?` resolves during the component renders.
-              full-tree      (binding [engine/*current-focus* (engine/current-focus app)]
-                               (engine/render-root root-class tree app))
+              full-tree      (p `render-root
+                               (binding [engine/*current-focus* (engine/current-focus app)]
+                                 (engine/render-root root-class tree app)))
               ;; Overlays (open `:modal` nodes) are composited on top of the base UI; the base is
               ;; laid out from the tree with all modals stripped, and the topmost overlay is placed
               ;; into its own screen window. Focus/cursor/scroll track the active layer.
@@ -313,15 +319,18 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
               {:keys [min-width min-height]} (root-min base-tree)
               too-small?     (or (< cols min-width) (< rows min-height))
               screen         {:x 0 :y 0 :w cols :h rows}
-              base-placed    (when-not too-small?
-                               (inject-scroll app (engine/place base-tree screen)))
-              overlay-placed (when (and (not too-small?) overlay)
-                               (inject-scroll app (engine/place overlay (engine/overlay-window-rect overlay screen))))
+              base-placed    (p `layout
+                               (when-not too-small?
+                                 (inject-scroll app (engine/place base-tree screen))))
+              overlay-placed (p `layout
+                               (when (and (not too-small?) overlay)
+                                 (inject-scroll app (engine/place overlay (engine/overlay-window-rect overlay screen)))))
               active-placed  (or overlay-placed base-placed)
-              buf            (if too-small?
-                               (too-small-buffer rows cols min-width min-height)
-                               (cond-> (engine/render-buffer base-placed rows cols)
-                                 overlay-placed (engine/paint overlay-placed screen)))
+              buf            (p `paint
+                               (if too-small?
+                                 (too-small-buffer rows cols min-width min-height)
+                                 (cond-> (engine/render-buffer base-placed rows cols)
+                                   overlay-placed (engine/paint overlay-placed screen))))
               last-size      (::last-size rt)
               size           {:rows rows :cols cols}
               resized?       (boolean (and last-size (not= last-size size)))
@@ -329,22 +338,74 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
               ;; On a resize the whole screen is repainted from scratch (`:clear?`): a plain full
               ;; repaint only writes non-blank cells, so without clearing, stale content from the
               ;; old size would linger on screen.
-              ansi           (engine/frame->ansi prev buf {:sync?  (term/t-sync-supported? terminal)
-                                                           :clear? resized?})]
-          (term/t-write! terminal ansi)
+              ansi           (p `serialize
+                               (engine/frame->ansi prev buf {:sync?  (term/t-sync-supported? terminal)
+                                                             :clear? resized?}))]
+          (p `write (term/t-write! terminal ansi))
           ;; Position the cursor AFTER the frame's drawing and flush once, so the cursor-move is
           ;; the last terminal command of the frame (otherwise the diff's writes leave the hardware
           ;; cursor wherever drawing ended, making the visible caret lag a frame on a real terminal).
-          (when active-placed
-            (position-cursor! app terminal active-placed))
-          (when (and too-small? (nil? active-placed))
-            (term/t-set-cursor! terminal 0 0 false))
-          (term/t-flush! terminal)
+          (p `cursor
+            (when active-placed
+              (position-cursor! app terminal active-placed))
+            (when (and too-small? (nil? active-placed))
+              (term/t-set-cursor! terminal 0 0 false)))
+          (p `flush (term/t-flush! terminal))
           (swap! (runtime-atom-key app) assoc
             ::prev-buffer buf
             ::placed active-placed
             ::last-size size)
-          app)))))
+          app))))))
+
+(>defn request-render!
+  "Requests a repaint of `app`, coalescing bursts into at most one render per throttle window.
+
+The throttle interval (ms) is read from the runtime atom (`::render-throttle-ms`, default `0`). When
+the interval is `<= 0` (the default for `attach!`/`step!`/direct `mount!` — i.e. the deterministic
+test path) this renders SYNCHRONOUSLY and is identical to calling `render!`.
+
+When the interval is `> 0` (the live run path: `run-blocking!`/`start!`) it is a leading+trailing
+edge throttle. If at least the interval has elapsed since the last render it renders immediately
+(leading edge) and records the time. Otherwise it schedules ONE daemon thread that sleeps the
+remaining time and then renders the LATEST app state (trailing edge); further requests inside that
+window coalesce into that single scheduled render (it reads current state at paint time, so the
+final state is always painted). The deferred paint is wrapped in try/catch so a render that lands
+after `quit!` closes the terminal cannot crash the daemon. Returns `app`."
+  [app]
+  [any? => any?]
+  (let [rt        (runtime app)
+        throttle  (long (or (::render-throttle-ms rt) 0))
+        last-atom (::last-render-ns rt)
+        sched     (::render-scheduled? rt)]
+    (if (or (<= throttle 0) (nil? last-atom) (nil? sched))
+      (render! app)
+      (let [interval-ns (* throttle 1000000)
+            now         (System/nanoTime)
+            last        (long (or @last-atom 0))
+            elapsed     (- now last)]
+        (if (>= elapsed interval-ns)
+          (do
+            (reset! last-atom now)
+            (render! app))
+          (when (compare-and-set! sched false true)
+            (let [remaining-ms (max 1 (quot (- interval-ns elapsed) 1000000))
+                  runnable     (fn deferred-render []
+                                 (try
+                                   (Thread/sleep (long remaining-ms))
+                                   (reset! last-atom (System/nanoTime))
+                                   (reset! sched false)
+                                   ;; Late paint guard: after quit! the loop's `:running?` is false
+                                   ;; and the terminal is closed. Skip if shutting down, and wrap the
+                                   ;; render so a stale frame can never crash the daemon nor surface.
+                                   (let [running? (some-> (runtime app) ::handle :running? deref)]
+                                     (when (not (false? running?))
+                                       (try (render! app) (catch Throwable _ nil))))
+                                   (catch Throwable _
+                                     (reset! sched false))))
+                  t            (Thread. ^Runnable runnable "fulcro-tui-render")]
+              (.setDaemon t true)
+              (.start t))))))
+    app))
 
 ;; ============================================================================
 ;; Step (single deterministic iteration)
@@ -356,9 +417,33 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
   [any? => any?]
   (::placed (runtime app)))
 
+(>defn- dispatch-key!
+  "Dispatches `key-event` against `app` WITHOUT rendering, returning `app`. This is the state-mutating
+half of `step!` (the render is the caller's responsibility, so the live loop can use a throttled
+`request-render!` while `step!`/tests render synchronously).
+
+Dispatch order:
+1. Viewport scroll keys (`viewport-scroll-key!`): if the focused node lies inside a viewport and
+   `key-event` is PageUp/PageDown, the enclosing viewport is scrolled and the focus/input pipeline
+   is skipped.
+2. Otherwise `engine/process-key!` handles focus/typing/activation/global-keymap, then
+   `follow-focus!` adjusts viewport scroll so the (possibly newly) focused node stays visible.
+
+The placed tree from the previous frame is used to locate the enclosing viewport for steps 1 & 2."
+  [app key-event global-keymap]
+  [any? map? (? map?) => any?]
+  (let [placed (placed-tree-of app)]
+    (when-not (and placed (viewport-scroll-key! app placed key-event))
+      (engine/process-key! app key-event global-keymap)
+      (follow-focus! app (or (placed-tree-of app) placed))))
+  app)
+
 (>defn step!
-  "Runs one deterministic driver iteration for `app`: dispatches `key-event` and then repaints
-(`render!`). Returns `app`. Used by tests and the input loop.
+  "Runs one deterministic driver iteration for `app`: dispatches `key-event` (`dispatch-key!`) and
+then repaints SYNCHRONOUSLY (`render!`). Returns `app`. Used by tests (which read the screen right
+after `step!` returns) and historically by the input loop. The live input loop now dispatches and
+then requests a THROTTLED render (`request-render!`) instead of calling `step!`, so this stays
+synchronous for deterministic tests.
 
 Dispatch order:
 1. Viewport scroll keys (`viewport-scroll-key!`): if the focused node lies inside a viewport and
@@ -373,13 +458,8 @@ The placed tree from the previous frame is used to locate the enclosing viewport
    (step! app key-event nil))
   ([app key-event global-keymap]
    [any? map? (? map?) => any?]
-   (let [placed (placed-tree-of app)]
-     (if (and placed (viewport-scroll-key! app placed key-event))
-       (render! app)
-       (do
-         (engine/process-key! app key-event global-keymap)
-         (follow-focus! app (or (placed-tree-of app) placed))
-         (render! app))))
+   (dispatch-key! app key-event global-keymap)
+   (render! app)
    app))
 
 ;; ============================================================================
@@ -403,8 +483,10 @@ size change (`t-on-resize!` → `render!`), sets initial focus to the first node
   (swap! (runtime-atom-key app) assoc ::terminal terminal)
   (term/t-enter! terminal)
   ;; Repaint when the terminal is resized. `render!` reads the fresh size and full-repaints with a
-  ;; clear, so the layout self-corrects without waiting for a keypress.
-  (term/t-on-resize! terminal (fn [] (render! app)))
+  ;; clear, so the layout self-corrects without waiting for a keypress. Routed through
+  ;; `request-render!` so rapid resize bursts coalesce on the live path; with throttling disabled
+  ;; (tests/direct attach!) this is a synchronous `render!`.
+  (term/t-on-resize! terminal (fn [] (request-render! app)))
   (when (nil? (engine/current-focus app))
     ;; Initial focus comes from the active layer (a startup overlay if one is open, else the base
     ;; tree with closed modals stripped) so it never lands inside an inactive modal.
@@ -427,6 +509,12 @@ size change (`t-on-resize!` → `render!`), sets initial focus to the first node
 * `:on-error`      - optional `(fn [app throwable])` called if the input loop throws. The loop
                      always also stashes the throwable on the handle's `:error` atom and leaves
                      the terminal.
+* `:max-fps`       - optional max live render frequency (frames/sec). When present and positive the
+                     input loop and resize/render hooks coalesce repaints to at most one per
+                     `(quot 1000 max-fps)` ms (trailing-edge debounce via `request-render!`). When
+                     absent (the default for a directly-called `mount!`, e.g. tests) throttling is
+                     DISABLED and every render path is synchronous == `step!`. `run-blocking!`/
+                     `start!` default this to 15.
 
 Returns a handle map `{:app :terminal :thread :running? :error}`. `:running?` is an atom that, when
 set false, stops the loop; `:error` is an atom holding any uncaught loop exception (else `nil`).
@@ -435,12 +523,19 @@ terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
   ([app]
    [any? => ::handle]
    (mount! app {}))
-  ([app {:keys [terminal global-keymap on-error]}]
+  ([app {:keys [terminal global-keymap on-error max-fps]}]
    [any? map? => ::handle]
    (let [terminal      (or terminal (term/jline-terminal))
          global-keymap (or global-keymap (::global-keymap (runtime app)))
+         throttle-ms   (if (and max-fps (pos? (long max-fps))) (quot 1000 (long max-fps)) 0)
          running?      (atom true)
          error         (atom nil)]
+     ;; Install throttle bookkeeping BEFORE attach! so the initial paint + resize handler see it.
+     ;; With throttle-ms 0 (no :max-fps) request-render! is synchronous == today.
+     (swap! (runtime-atom-key app) assoc
+       ::render-throttle-ms throttle-ms
+       ::last-render-ns (atom 0)
+       ::render-scheduled? (atom false))
      (attach! app terminal)
      (let [loop-fn (fn input-loop []
                      (try
@@ -450,10 +545,18 @@ terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
                              (when @running?
                                ;; Global/reserved chords (e.g. quit) are dispatched at the loop
                                ;; level so they fire regardless of which node has focus; everything
-                               ;; else goes through the focus/input pipeline via `step!`.
+                               ;; else goes through the focus/input pipeline. We dispatch the key
+                               ;; (state mutation) then request a THROTTLED render — coalescing the
+                               ;; loop's request with the synchronous `:core-render!` hook that a
+                               ;; transaction in `dispatch-key!` may also fire, killing the double
+                               ;; render and capping live repaints at `:max-fps`.
                                (if-let [h (and global-keymap (get global-keymap (engine/key-chord k)))]
                                  (h app k)
-                                 (step! app k))
+                                 (do
+                                   ;; nil global-keymap here mirrors the prior `(step! app k)` call;
+                                   ;; reserved chords are already handled by the branch above.
+                                   (dispatch-key! app k nil)
+                                   (request-render! app)))
                                (recur)))))
                        ;; C2: an uncaught exception must NOT silently kill the thread and make
                        ;; `run-blocking!`'s join look like a clean exit. Stash it on the handle's
@@ -472,15 +575,26 @@ terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
 (>defn run-blocking!
   "Mounts `app` (see `mount!`) and blocks until the input loop's thread finishes (the terminal
 reaches EOF or the loop is stopped). `opts` are passed to `mount!`. Returns the handle. (Named
-`run-blocking!` rather than `run!` to avoid shadowing `clojure.core/run!`.)"
+`run-blocking!` rather than `run!` to avoid shadowing `clojure.core/run!`.)
+
+Unlike a bare `mount!`, the live run path DEFAULTS to `:max-fps 30` (≈33ms trailing-edge debounce)
+so a real interactive session caps repaints; override with an explicit `:max-fps` in `opts` (use
+`0`/negative to disable throttling).
+
+When the `fulcro.tui.perf` system property is set (see `com.fulcrologic.fulcro.tui.perf`), the
+whole session is profiled automatically and a self-time report is printed to stdout once the loop
+ends — by then `mount!`'s `finally` has left/restored the terminal, so the table prints cleanly.
+Without the property the `perf/profile` wrapper compiles away entirely (zero overhead)."
   ([app]
    [any? => ::handle]
    (run-blocking! app {}))
   ([app opts]
    [any? map? => ::handle]
-   (let [{:keys [^Thread thread] :as handle} (mount! app opts)]
-     (.join thread)
-     handle)))
+   (perf/profile {}
+     (let [opts                            (merge {:max-fps 30} opts)
+           {:keys [^Thread thread] :as handle} (mount! app opts)]
+       (.join thread)
+       handle))))
 
 (>defn quit!
   "Stops the input loop for a `mount!`/`run-blocking!` `handle` (or, given an `app`, looks up its
@@ -551,7 +665,7 @@ Typically you will use `run-blocking!` to actually run the application."
               (rapp/fulcro-app
                 (merge
                   opts
-                  (cond-> {:core-render!      (fn [app _opts] (render! app))
+                  (cond-> {:core-render!      (fn [app _opts] (request-render! app))
                            :optimized-render! (fn [_app _opts] true)
                            :render-root!      (constantly true)}))))]
     ;; Default-on: initialize from the Root's declared :initial-state unless the caller
@@ -569,8 +683,9 @@ Typically you will use `run-blocking!` to actually run the application."
 the common case. `(start! app-opts)` or `(start! app-opts run-opts)` is equivalent to
 `(run-blocking! (application app-opts) run-opts)`. `app-opts` are `application`'s options
 (`:root-class`, `:initial-state`, `:remotes`, `:global-keymap`, `:inspect?`); `run-opts` are
-`mount!`'s (`:terminal`, `:global-keymap`, `:on-error`). Blocks until the loop ends (EOF/`quit!`).
-Returns the handle."
+`mount!`'s (`:terminal`, `:global-keymap`, `:on-error`, `:max-fps`). Like `run-blocking!`, live
+rendering DEFAULTS to `:max-fps 30`; override via `run-opts`. Blocks until the loop ends
+(EOF/`quit!`). Returns the handle."
   ([app-opts]
    [map? => ::handle]
    (start! app-opts {}))
