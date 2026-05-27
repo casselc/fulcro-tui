@@ -7,13 +7,21 @@ A terminal (TUI) rendering target for https://github.com/fulcrologic/fulcro[Fulc
 
 Fulcro has always been full-stack CLJC in all ways (rendering and server processing alike). To date the server support for "rendering" has largely been useful for headless testing, but all the machinery for more was always present.
 
-This library (finally& provides an alternative rendering target: The terminal!
+This library (finally) provides an alternative rendering target: The terminal!
 
 it lays out a tree of terminal-native nodes (boxes, text, inputs, buttons) and paints them into a character-cell buffer that is displayed in a real terminal via JLine. Components are written with Fulcro's standard `defsc` macro (their render simply returns a tree of terminal nodes) and driven by the same Fulcro data-management primitives (mutations, normalized state, transactions).
 
 The result is a Fulcro/React-like experience with a terminal UI.
 
 Babashka support made possible by the inclusion of JLine!
+
+[TIP]
+====
+*New here? Read the link:Guide.adoc[Fulcro TUI Guide].* It is the complete reference —
+getting started, the element catalog, layout, focus/keyboard, modals & pickers, the
+application lifecycle, performance measurement, and headless testing. This README is just
+a quick tour; the link:Guide.adoc[Guide] covers everything in depth.
+====
 
 == Status
 
@@ -60,7 +68,7 @@ Controls:
 
 TIP: To profile the render/I/O pipeline, launch with the `fulcro.tui.perf` system property set
 (`bb -Dfulcro.tui.perf=1 tui` or `clojure -J-Dfulcro.tui.perf=1 -M:tui`); the session is profiled
-and a self-time report prints after you quit. See the Guide's _Measuring performance_ section.
+and a self-time report prints after you quit. See the link:Guide.adoc[Guide]'s _Measuring performance_ section.
 
 == Overlays: modal and picker
 
@@ -98,4 +106,6 @@ cancels):
              :on-cancel (fn []  (tui/transact! this [(close-picker)]))})
 ----
 
-See the demo source in this repository for more examples.
+See the demo source in this repository for more examples, and the link:Guide.adoc[Fulcro TUI Guide]
+for full coverage of elements, layout, focus/keyboard, overlays, the application lifecycle, and
+headless testing.
