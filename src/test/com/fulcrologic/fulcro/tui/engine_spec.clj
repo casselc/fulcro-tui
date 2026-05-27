@@ -1378,5 +1378,65 @@
       "leaves base content outside the window visible"
       (subs (nth scr 0) 0 14) => "XXXXXXXXXXXXXX")))
 
+;; ---------------------------------------------------------------------------
+;; Custom rendered-tag extension (the `content-size`/`place`/`paint` multimethod seams).
+;; Register namespaced `:test/*` tags so they cannot collide with the built-ins.
+;; ---------------------------------------------------------------------------
+
+(defn- test-node
+  "Builds a bare engine node `{::tag ::attrs ::children}` for the extension specs."
+  [tag attrs children]
+  {::engine/tag tag ::engine/attrs attrs ::engine/children children})
+
+;; A custom LEAF: natural size 3x1, paints '#' across its rect.
+(defmethod engine/content-size :test/block [_] {:w 3 :h 1})
+(defmethod engine/paint :test/block [buf node clip]
+  (let [{:keys [x y w h]} (::engine/rect node)]
+    (reduce (fn [b [cx cy]] (if (engine/in-clip? clip cx cy) (engine/put-cell b cx cy \# {}) b))
+      buf (for [cy (range y (+ y h)) cx (range x (+ x w))] [cx cy]))))
+
+;; A custom CONTAINER that reuses the built-in vbox layout via `place-stack`. A container needs BOTH
+;; a `place` (lay children out) and a `paint` (recurse into the placed children).
+(defmethod engine/place :test/grid [node rect]
+  (let [{:keys [l r t b]} (engine/edge-insets (::engine/attrs node))
+        content {:x (+ (:x rect) l) :y (+ (:y rect) t)
+                 :w (max 0 (- (:w rect) l r)) :h (max 0 (- (:h rect) t b))}]
+    (assoc node ::engine/rect rect
+      ::engine/children (engine/place-stack :v content (mapv engine/as-node (::engine/children node))))))
+(defmethod engine/paint :test/grid [buf node clip]
+  (let [node-clip (engine/rect-intersection clip (::engine/rect node))]
+    (reduce (fn [b child] (engine/paint b child node-clip)) buf (::engine/children node))))
+
+(specification "custom rendered-tag extension via multimethods"
+  (component "content-size dispatches to a registered custom tag"
+    (assertions
+      "uses the registered method's natural size"
+      (engine/intrinsic-size (test-node :test/block {} [])) => {:w 3 :h 1}
+      "the node's own :width still overrides the custom natural size"
+      (engine/intrinsic-size (test-node :test/block {:width 5} [])) => {:w 5 :h 1}))
+  (component "an unregistered custom tag falls back without error"
+    (assertions
+      "sizes to insets only (zero here) when nothing is declared"
+      (engine/intrinsic-size (test-node :test/unknown {} [])) => {:w 0 :h 0}
+      "still honors declared :width/:height on an unknown tag"
+      (engine/intrinsic-size (test-node :test/unknown {:width 2 :height 4} [])) => {:w 2 :h 4}
+      "paints blank (no draw) without throwing or looping"
+      (engine/screen (engine/render-buffer (engine/place (test-node :test/unknown {} []) {:x 0 :y 0 :w 3 :h 1}) 1 3))
+      => ["   "]))
+  (component "paint dispatches to a registered custom leaf tag"
+    (assertions
+      "the registered method draws its own cells"
+      (engine/screen (engine/render-buffer (engine/place (test-node :test/block {} []) {:x 0 :y 0 :w 3 :h 1}) 1 3))
+      => ["###"]))
+  (component "place dispatches to a registered custom container that reuses place-stack"
+    (let [tree   (test-node :test/grid {} [(test-node :test/block {} []) (test-node :test/block {} [])])
+          placed (engine/place tree {:x 0 :y 0 :w 3 :h 2})]
+      (assertions
+        "stacks children vertically, one row each (rects from place-stack)"
+        (mapv #(::engine/rect %) (::engine/children placed))
+        => [{:x 0 :y 0 :w 3 :h 1} {:x 0 :y 1 :w 3 :h 1}]
+        "and the container paints both children"
+        (engine/screen (engine/render-buffer placed 2 3)) => ["###" "###"]))))
+
 ;; NOTE: element-generator specs (`elements/element`, `elements/focused?`, `elements/picker`)
 ;; live in `com.fulcrologic.fulcro.tui.elements-spec`.

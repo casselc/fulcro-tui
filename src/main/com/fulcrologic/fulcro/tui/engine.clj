@@ -182,7 +182,7 @@ Conventions:
 (>def ::h nat-int?)
 (>def ::size (s/keys :req-un [::w ::h]))
 
-(>defn- edge-insets
+(>defn edge-insets
   "Returns `{:l :r :t :b}` per-edge insets implied by `attrs`. `:border?` adds 1 to every edge and
 `:padding` (a non-negative integer) adds its value to every edge."
   [attrs]
@@ -224,9 +224,11 @@ one line."
     (number? c) {:w (string-width (str c)) :h 1}
     :else {:w 0 :h 0}))
 
-(>defn- content-size
-  "Returns the content-driven intrinsic `{:w :h}` of `node` for its tag, before the node's own fixed
-`:width`/`:height` or `:min-*` overrides are applied. Container sizes include edge insets."
+(>defn- internal-content-size
+  "Returns the content-driven intrinsic `{:w :h}` of a BUILT-IN `node` for its tag, before the node's
+own fixed `:width`/`:height` or `:min-*` overrides are applied. Container sizes include edge insets.
+The `case` default is a terminal fallback (insets only) used for an unregistered custom tag — a custom
+tag that declares `:width`/`:height` still sizes via the overrides applied in `intrinsic-size-impl`."
   [node]
   [::node => ::size]
   (let [{::keys [tag attrs]} node
@@ -248,7 +250,18 @@ one line."
                              :h (+ ih (reduce + 0 (map :h sizes)))})
       :hbox (let [sizes (map child-size (::children node))]
               {:w (+ iw (reduce + 0 (map :w sizes)))
-               :h (+ ih (apply max 0 (map :h sizes)))}))))
+               :h (+ ih (apply max 0 (map :h sizes)))})
+      {:w iw :h ih})))
+
+(defmulti content-size
+  "Returns the content-driven intrinsic `{:w :h}` of `node` for its `::tag`, BEFORE the node's own
+`:width`/`:height`/`:min-*` overrides (which `intrinsic-size` applies). Extension seam for custom
+RENDERED tags: register the natural size of your tag with `(defmethod content-size :my/tag [node]
+{:w .. :h ..})` (include any `:padding`/`:border?` insets yourself — see `edge-insets`). Built-in
+tags are handled by `:default`; an unregistered custom tag falls back to insets-only."
+  (fn [node] (::tag node)))
+
+(defmethod content-size :default [node] (internal-content-size node))
 
 (def ^:private intrinsic-size-impl
   "Memoized worker for `intrinsic-size`. Computes the intrinsic size of an UNPLACED `node` from its
@@ -293,7 +306,7 @@ entry point and is what `child-size` recurses through, so every subtree level hi
 (>def ::y int?)
 (>def ::rect (s/keys :req-un [::x ::y ::w ::h]))
 
-(>defn- as-node
+(>defn as-node
   "Returns `c` unchanged if it is a node, otherwise wraps it as a `:text` node. Lets containers hold
 bare strings/numbers, which become text lines."
   [c]
@@ -390,13 +403,23 @@ virtual content is no larger than the view, that axis clamps to 0. Pure."
     {:x (max 0 (min (long (:x scroll)) max-x))
      :y (max 0 (min (long (:y scroll)) max-y))}))
 
-(declare place)
+(defmulti place
+  "Returns `node` laid out within the outer `rect` `{:x :y :w :h}`: annotates it with its `::rect` and
+replaces `::children` with placed children (each carrying its own `::rect`). Dispatches on `::tag`.
 
-(>defn- place-stack
+Extension seam for custom RENDERED tags: register a custom CONTAINER's layout with `(defmethod place
+:my/tag [node rect] ...)`. To lay children out like a `:vbox`/`:hbox`, reuse `place-stack`; to place a
+single child, call `place` recursively; use `edge-insets`/`as-node` for the content rect and child
+coercion. Built-in tags are handled by `:default`; an unregistered custom tag is treated as a leaf
+(gets a `::rect`, children left for its paint method)."
+  (fn [node _rect] (::tag node)))
+
+(>defn place-stack
   "Places `children` within the `content` rectangle along `axis` (`:v` stacks vertically, `:h`
 horizontally). Main-axis sizes are distributed by `distribute-main`; on the cross axis each child
 fills the track unless it declares a size, in which case `:align` positions it. Returns the vector
-of placed children."
+of placed children. Public so a custom container's `place` method can reuse the built-in
+`:vbox`/`:hbox` layout."
   [axis content children]
   [#{:v :h} ::rect (s/coll-of ::node) => vector?]
   (let [vertical?    (= axis :v)
@@ -422,12 +445,11 @@ of placed children."
           (recur (+ offset msz) (next cs) (next ms) (conj out (place c rect))))
         out))))
 
-(>defn place
-  "Returns `node` laid out within the outer `rect` `{:x :y :w :h}`. The node is annotated with its
-`::rect`, and its children are replaced with placed children (each carrying its own `::rect`).
-`:vbox`/`:hbox` partition their content area among children (honoring fixed/`:half`/`:fraction`/
-`:grow`/content sizing and `:align`); `:box` fills its content area with each child; leaves keep
-their string/number children for the paint pass. `:border?`/`:padding` inset the content area.
+(>defn- internal-place
+  "Lays out a BUILT-IN `node` within the outer `rect` (the `place` `:default`). `:vbox`/`:hbox`
+partition their content area among children (honoring fixed/`:half`/`:fraction`/`:grow`/content
+sizing and `:align`); `:box` fills its content area with each child; leaves keep their string/number
+children for the paint pass. `:border?`/`:padding` inset the content area.
 
 A `:viewport` is special: it has a bounded outer `::rect` (sized like any box), but its single
 child is laid out at the child's NATURAL height (and the viewport's content width) into a VIRTUAL
@@ -435,37 +457,42 @@ rect `{:x 0 :y 0 :w content-w :h (max content-h natural-h)}` — i.e. in 0-based
 rather than absolute screen coordinates. The placed virtual child subtree is stored under
 `::viewport-content`, the virtual content size under `::virtual-size {:w :h}`, and a default
 `::scroll {:x 0 :y 0}` is attached (the driver later injects the real scroll). The viewport's
-`::children` are also placed (in virtual coords) so generic walkers still see them."
+`::children` are also placed (in virtual coords) so generic walkers still see them.
+
+The `case` default is the terminal leaf placement (annotate `::rect`, keep children), used by the
+built-in leaves AND by an unregistered custom tag — so it must NOT re-enter `place`."
   [node rect]
   [::node ::rect => (s/keys :req [::tag ::attrs ::rect ::children])]
-  (p ::place
-    (let [{::keys [tag attrs children]} node
-          {:keys [l r t b]} (edge-insets attrs)
-          content {:x (+ (:x rect) l)
-                   :y (+ (:y rect) t)
-                   :w (max 0 (- (:w rect) l r))
-                   :h (max 0 (- (:h rect) t b))}]
-      (case tag
-        (:vbox :modal) (assoc node ::rect rect ::children (place-stack :v content (mapv as-node children)))
-        :hbox (assoc node ::rect rect ::children (place-stack :h content (mapv as-node children)))
-        :viewport
-        (let [child        (as-node (first children))
-              ;; A wrapping text inside a viewport wraps to the viewport's content width, so its
-              ;; natural (virtual) height is its wrapped line count at that width rather than 1.
-              natural-h    (if (wrapping-text? child)
-                             (wrapped-line-count child (:w content))
-                             (:h (intrinsic-size child)))
-              virtual-h    (max (:h content) natural-h)
-              virtual      {:x 0 :y 0 :w (:w content) :h virtual-h}
-              placed-child (place child virtual)]
-          (assoc node
-            ::rect rect
-            ::children [placed-child]
-            ::viewport-content placed-child
-            ::virtual-size {:w (:w content) :h virtual-h}
-            ::scroll {:x 0 :y 0}))
-        :box (assoc node ::rect rect ::children (mapv #(place (as-node %) content) children))
-        (assoc node ::rect rect ::children children)))))
+  (let [{::keys [tag attrs children]} node
+        {:keys [l r t b]} (edge-insets attrs)
+        content {:x (+ (:x rect) l)
+                 :y (+ (:y rect) t)
+                 :w (max 0 (- (:w rect) l r))
+                 :h (max 0 (- (:h rect) t b))}]
+    (case tag
+      (:vbox :modal) (assoc node ::rect rect ::children (place-stack :v content (mapv as-node children)))
+      :hbox (assoc node ::rect rect ::children (place-stack :h content (mapv as-node children)))
+      :viewport
+      (let [child        (as-node (first children))
+            ;; A wrapping text inside a viewport wraps to the viewport's content width, so its
+            ;; natural (virtual) height is its wrapped line count at that width rather than 1.
+            natural-h    (if (wrapping-text? child)
+                           (wrapped-line-count child (:w content))
+                           (:h (intrinsic-size child)))
+            virtual-h    (max (:h content) natural-h)
+            virtual      {:x 0 :y 0 :w (:w content) :h virtual-h}
+            placed-child (place child virtual)]
+        (assoc node
+          ::rect rect
+          ::children [placed-child]
+          ::viewport-content placed-child
+          ::virtual-size {:w (:w content) :h virtual-h}
+          ::scroll {:x 0 :y 0}))
+      :box (assoc node ::rect rect ::children (mapv #(place (as-node %) content) children))
+      (assoc node ::rect rect ::children children))))
+
+(defmethod place :default [node rect]
+  (p ::place (internal-place node rect)))
 
 ;; ============================================================================
 ;; Render — cell buffer
@@ -517,7 +544,7 @@ Writes that fall outside the buffer bounds are ignored (clipped), returning the 
     (assoc-in buffer [:cells (+ x (* y (:cols buffer)))] {:ch ch :sgr style})
     buffer))
 
-(>defn- in-clip?
+(>defn in-clip?
   "Returns true if column `x`, row `y` is inside the `clip` rect `{:x :y :w :h}`."
   [clip x y]
   [::rect int? int? => boolean?]
@@ -598,7 +625,7 @@ sequence `\"\\u001b[0m\"`."
 ;; Render — paint
 ;; ============================================================================
 
-(>defn- node-style
+(>defn node-style
   "Returns the `::style` map implied by a node's `attrs`. `:highlight true` sets `:reverse?`,
 `:color <kw>` sets `:fg`, `:bg <kw>` sets `:bg`, and `:bold true` sets `:bold?`."
   [attrs]
@@ -609,7 +636,7 @@ sequence `\"\\u001b[0m\"`."
     (:bg attrs) (assoc :bg (:bg attrs))
     (:bold attrs) (assoc :bold? true)))
 
-(>defn- rect-intersection
+(>defn rect-intersection
   "Returns the rectangle that is the intersection of rects `a` and `b`. When they do not overlap the
 result has zero (or negative-clamped) width/height."
   [a b]
@@ -620,7 +647,7 @@ result has zero (or negative-clamped) width/height."
         y2 (min (+ (:y a) (:h a)) (+ (:y b) (:h b)))]
     {:x x :y y :w (max 0 (- x2 x)) :h (max 0 (- y2 y))}))
 
-(>defn- fill-rect
+(>defn fill-rect
   "Returns `buffer` with every cell of `rect` set to a space in `style`, clipped to `clip`."
   [buffer rect style clip]
   [::buffer ::rect ::style ::rect => ::buffer]
@@ -636,7 +663,7 @@ result has zero (or negative-clamped) width/height."
     buffer
     (range (:y rect) (+ (:y rect) (:h rect)))))
 
-(>defn- draw-border
+(>defn draw-border
   "Returns `buffer` with a single-cell box-drawing border (`┌┐└┘` corners, `─` top/bottom, `│` sides)
 drawn around the outer `rect`, clipped to `clip`. Boxes smaller than 2x2 are not drawn."
   [buffer rect style clip]
@@ -655,7 +682,7 @@ drawn around the outer `rect`, clipped to `clip`. Boxes smaller than 2x2 are not
           (put $ x2 y2 \┘)))
       buffer)))
 
-(>defn- content-rect
+(>defn content-rect
   "Returns the inner content rectangle of placed `node`: its `::rect` shrunk by the edge insets implied
 by its attrs (`:border?`/`:padding`)."
   [node]
@@ -667,7 +694,7 @@ by its attrs (`:border?`/`:padding`)."
      :w (max 0 (- (:w r) l r'))
      :h (max 0 (- (:h r) t b))}))
 
-(>defn- blit
+(>defn blit
   "Returns `dest` buffer with the `[src-x src-y w h]` window of the `src` buffer copied so that the
 window's top-left lands at `dest-x`,`dest-y` in `dest`. Each copied cell is written via `put-cell`,
 so writes are clipped to `dest`'s bounds; in addition, copies are clipped to `clip` (a dest-space
@@ -695,7 +722,18 @@ rect). Cells read from outside `src`'s bounds are skipped. Pure."
       dest
       (range 0 h))))
 
-(declare paint)
+(defmulti paint
+  "Returns `buffer` after painting placed `node` (and its descendants) into it, clipping all writes to
+`clip`. Dispatches on `::tag`. Uses the painter's algorithm: a node paints itself (border/background
+or its text) then its children, so children draw over parents.
+
+Extension seam for custom RENDERED tags: register `(defmethod paint :my/tag [buffer node clip] ...)`,
+drawing into `buffer` with the public painter toolkit (`put-cell`, `put-str`, `fill-rect`,
+`draw-border`, `blit`, `node-style`, `content-rect`, `rect-intersection`, `in-clip?`); to paint
+children, call `paint` recursively. Built-in tags are handled by `:default`; an unregistered custom
+tag paints nothing."
+  (fn [_buffer node _clip] (::tag node)))
+
 (declare render-buffer)
 (declare wrap-layout)
 (declare multiline-input?)
@@ -705,10 +743,12 @@ rect). Cells read from outside `src`'s bounds are skipped. Pure."
   [tag]
   (keyword "paint" (name tag)))
 
-(>defn- paint-node*
-  "Returns `buffer` after painting placed `node` and its descendants, clipping every write to `clip`
-(the intersection of ancestor rects). Containers draw their border/background then recurse; leaves
-write their text/value/rule into their content rect."
+(>defn- internal-paint
+  "Returns `buffer` after painting a BUILT-IN placed `node` and its descendants (the `paint`
+`:default`), clipping every write to `clip` (the intersection of ancestor rects). Containers draw
+their border/background then recurse (via `paint`, so custom children dispatch); leaves write their
+text/value/rule into their content rect. The `case` default is a terminal fallback (paint nothing)
+for an unregistered custom tag — it must NOT re-enter `paint`."
   [buffer node clip]
   [::buffer ::node ::rect => ::buffer]
   (let [{::keys [tag attrs children]} node
@@ -784,23 +824,15 @@ write their text/value/rule into their content rect."
       (:box :vbox :hbox)
       (let [buf (if (seq style) (fill-rect buffer cr style content-clip) buffer)
             buf (if (:border? attrs) (draw-border buf rect style node-clip) buf)]
-        (reduce (fn [b child] (paint b child node-clip)) buf children)))))
+        (reduce (fn [b child] (paint b child node-clip)) buf children))
 
-(>defn- paint-node
-  "Profiling wrapper for `paint-node*`: records per-tag paint time (self-time excludes nested child
-   paints, which are themselves wrapped) under a `:paint/<tag>` id, then delegates."
-  [buffer node clip]
-  [::buffer ::node ::rect => ::buffer]
+      buffer)))
+
+(defmethod paint :default [buffer node clip]
+  ;; Built-in tags (and unregistered custom tags) route here. The `p` per-tag profiling wraps EVERY
+  ;; built-in node; a custom tag's own `defmethod` may add its own `p` if it wants profiling.
   (p (paint-id (::tag node))
-    (paint-node* buffer node clip)))
-
-(>defn paint
-  "Returns `buffer` after painting placed `node` (and its descendants) into it, clipping all writes to
-`clip`. Uses the painter's algorithm: a node paints itself (border/background or its text) and then
-its children, so children draw over parents."
-  [buffer node clip]
-  [::buffer ::node ::rect => ::buffer]
-  (paint-node buffer node clip))
+    (internal-paint buffer node clip)))
 
 (>defn render-buffer
   "Returns a fresh `rows`x`cols` buffer with the placed tree rooted at `placed-root` painted into it.

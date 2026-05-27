@@ -27,8 +27,9 @@ a quick tour; the link:Guide.adoc[Guide] covers everything in depth.
 
 Clone the report and run the demo under babashka with `bb run tui` — see `bb.edn` for details.
 
-NOT API stable while in alpha, but expect any changes to be pretty minor. All of the UI stuff is pretty solid, and
-the Fulcro patterns have been stable for years.
+API stable at 1.0.0-RC1. Everything is pretty well-tested on the rendering front, and fast (60fps on my m1 mac).
+The Fulcro patterns have been stable for years, but the new bb support of Fulcro is not widely tested, so
+expect that if you use something we haven't tried yet, it may not work.
 
 == Adding as a dependency
 

@@ -207,11 +207,12 @@ the namespace. Everything else — running mutations, querying, app state — is
 
 [NOTE]
 ====
-Under the hood each generator just returns a plain map and the driver walks that tree
-to lay it out and paint it — you never build or inspect those maps to *use* the
-library. If you are extending the engine or writing headless tests, the node
-vocabulary and the render pipeline (`engine/render-tree`/`render-root`/`render-buffer`/
-`screen`) are covered under <<_testing_headless,Testing / Headless>>.
+Under the hood each generator just returns a plain map and the driver walks that tree to lay it out
+and paint it — you never build or inspect those maps to *use* the library. To add a brand-new
+low-level element of your own (a custom painting primitive, not a composition), see
+<<_extending_custom_rendered_elements,Extending: custom rendered elements>>. The node vocabulary and
+the render pipeline (`engine/render-tree`/`render-root`/`render-buffer`/`screen`) are covered under
+<<_testing_headless,Testing / Headless>>.
 ====
 
 = Defining Components
@@ -1016,6 +1017,99 @@ NOTE: The bundled specs under `src/test/com/fulcrologic/fulcro/tui/`
 typing, activation, viewport scrolling, multiline editing, overlays/pickers, and the
 input loop. They are the most complete worked reference.
 
+= Extending: custom rendered elements
+
+== Compose first
+
+Almost every UI need is met by *composing* the built-in elements inside an ordinary `defsc`
+component — a labeled field, a status bar, a card, a list row are all `vbox`/`hbox`/`box`/`text`
+arrangements. Reach for a brand-new low-level element only for a genuinely new *painting primitive*:
+something no arrangement of `text`/`box`/`line` can express (a sparkline, a gauge/bar, a custom
+glyph block). Composition needs no engine changes; a new primitive does.
+
+== The three render seams
+
+The engine resolves three per-tag rendering decisions through multimethods on `::engine/tag`, each
+with a fast built-in path and an open `:default`. To add a rendered tag, `defmethod` the ones you
+need:
+
+[cols="1,4"]
+|===
+| Multimethod | Implement it to…
+
+| `engine/content-size` | report your tag's natural `{:w :h}` (before the node's own `:width`/`:height`/`:min-*` overrides). Optional — omit it and just set `:width`/`:height` on the node.
+| `engine/place` | lay out a custom *container's* children. Omit for a leaf (it is given a `::rect` automatically).
+| `engine/paint` | draw your tag's cells into the buffer. Required for anything visible.
+|===
+
+A registered tag is resolved at dispatch; an *unregistered* tag is harmless — it sizes to its insets,
+places as a leaf, and paints nothing (no error, no infinite loop).
+
+== A custom leaf (a bar gauge)
+
+[source,clojure]
+-----
+(ns my.widgets
+  (:require
+    [com.fulcrologic.fulcro.tui.elements :as elements]
+    [com.fulcrologic.fulcro.tui.engine :as engine]))
+
+;; 1. A generator that emits your tag. (`elements/element` is the generic node builder.)
+(defn bar [& args] (elements/element :my/bar args))      ; e.g. (bar {:value 0.6 :width 20})
+
+;; 2. Natural size (optional). Include your own :padding/:border? insets if you support them.
+(defmethod engine/content-size :my/bar [_] {:w 10 :h 1})
+
+;; 3. Paint: fill `:value` (0.0–1.0) of the width with a solid block, the rest with a light one.
+(defmethod engine/paint :my/bar [buf node clip]
+  (let [{:keys [x y w]} (::engine/rect node)
+        style  (engine/node-style (::engine/attrs node))
+        filled (long (* (double (or (:value (::engine/attrs node)) 0.0)) w))]
+    (reduce (fn [b i]
+              (if (engine/in-clip? clip (+ x i) y)
+                (engine/put-cell b (+ x i) y (if (< i filled) \█ \░) style)
+                b))
+      buf (range w))))
+-----
+
+Now `(bar {:value 0.6 :width 20 :color :green})` renders anywhere a built-in element does.
+
+NOTE: The painter toolkit a `paint` method may use is all public in `engine`: `put-cell`, `put-str`,
+`fill-rect`, `draw-border`, `blit`, plus the geometry/style helpers `node-style`, `content-rect`,
+`rect-intersection`, and `in-clip?`. To paint child nodes, call `engine/paint` recursively.
+
+== A custom container (reusing the built-in layout)
+
+A container needs BOTH a `place` (lay children out) and a `paint` (recurse into the placed children).
+Rather than reimplement distribution, reuse `engine/place-stack` — the same `:vbox`/`:hbox` engine
+that honors `:width`/`:height`/`:half`/`:fraction`/`:grow`/`:align`:
+
+[source,clojure]
+-----
+(defmethod engine/place :my/grid [node rect]
+  (let [{:keys [l r t b]} (engine/edge-insets (::engine/attrs node))   ; honor own padding/border
+        content {:x (+ (:x rect) l) :y (+ (:y rect) t)
+                 :w (max 0 (- (:w rect) l r)) :h (max 0 (- (:h rect) t b))}]
+    (assoc node ::engine/rect rect
+      ::engine/children (engine/place-stack :v content
+                          (mapv engine/as-node (::engine/children node))))))
+
+(defmethod engine/paint :my/grid [buf node clip]
+  (let [node-clip (engine/rect-intersection clip (::engine/rect node))]
+    (reduce (fn [b child] (engine/paint b child node-clip)) buf (::engine/children node))))
+-----
+
+For fully custom layout, skip `place-stack` and compute each child's rect yourself, calling
+`engine/place` per child. `engine/as-node` coerces bare string/number children into text nodes.
+
+== Focus and input
+
+A custom element joins the keyboard focus ring by carrying `:focusable? true` (and an `:id`) — no new
+tag machinery is needed; see <<_buttons_focus_keyboard,Buttons, Focus & Keyboard>>. Text *input* is
+intentionally NOT extensible: editable fields are the built-in `:input`, and the typing/caret
+pipeline is closed. Build interactive widgets by handling activation (`:on-activate`) and reading
+state, not by inventing a new input type.
+
 = Reference: Namespaces at a glance
 
 The library is six namespaces under `com.fulcrologic.fulcro.tui.*`:
@@ -1028,7 +1122,7 @@ The library is six namespaces under `com.fulcrologic.fulcro.tui.*`:
 | Element generators (`element`, `vbox`, `hbox`, `box`, `text`, `input`, `button`, `line`, `viewport`, `modal`, `picker`), plus `focused?`. State changes use Fulcro's own `comp/transact!` — there is no TUI-specific transact.
 
 | `com.fulcrologic.fulcro.tui.engine` (`engine`)
-| The node model, walker, layout, paint, and diff. Defines the node vocabulary (`::engine/tag`/`attrs`/`children`/`node`), `node?`, node accessors, the render pipeline (`render-tree`/`render-root`/`render-buffer`/`screen`), focus & scroll state (`focus!`, `current-focus`, `focus-order`, `focusables`, `get-caret`, `viewport-scroll`, `*current-focus*`), and helpers (`string-width`, `palette`, `key-chord`).
+| The node model, walker, layout, paint, and diff. Defines the node vocabulary (`::engine/tag`/`attrs`/`children`/`node`), `node?`, node accessors, the render pipeline (`render-tree`/`render-root`/`render-buffer`/`screen`), focus & scroll state (`focus!`, `current-focus`, `focus-order`, `focusables`, `get-caret`, `viewport-scroll`, `*current-focus*`), and helpers (`string-width`, `palette`, `key-chord`). The per-tag render seams `content-size`/`place`/`paint` are multimethods on `::engine/tag` — `defmethod` them to add a custom rendered element (see <<_extending_custom_rendered_elements,Extending>>), using the public painter/layout toolkit (`put-cell`, `put-str`, `fill-rect`, `draw-border`, `blit`, `node-style`, `content-rect`, `rect-intersection`, `in-clip?`, `place-stack`, `as-node`, `edge-insets`).
 
 | `com.fulcrologic.fulcro.tui.application` (`app`)
 | The application lifecycle and terminal driver: `application`, `attach!`, `mount!`, `run-blocking!`, `quit!`, `step!`, and the inspection helpers `screen-of`/`screen-styled-of`.
