@@ -27,20 +27,20 @@
    :ident         (fn [] [:component/id ::root])
    :initial-state {:app/a "" :app/b "" :app/ok? false}}
   (elements/vbox {:id "root"}
-            (elements/input {:id        :a
-                        :value     a
-                        :on-change (fn [v _caret] (elements/transact! this [(set-a {:v v})]))})
-            (elements/input {:id        :b
-                        :value     b
-                        :on-change (fn [v _caret] (elements/transact! this [(set-b {:v v})]))})
-            (elements/button {:id          :ok
+                 (elements/input {:id        :a
+                                  :value     a
+                                  :on-change (fn [v _caret] (elements/transact! this [(set-a {:v v})]))})
+                 (elements/input {:id        :b
+                                  :value     b
+                                  :on-change (fn [v _caret] (elements/transact! this [(set-b {:v v})]))})
+                 (elements/button {:id          :ok
                  ;; route-key only fires :on-key, so activation lives there (enter/space).
-                         :on-key      (fn [e]
-                                        (when (#{:enter " "} (:key e))
-                                          (elements/transact! this [(set-ok {})])
-                                          :handled))
-                         :on-activate (fn [] (elements/transact! this [(set-ok {})]))}
-                        (if ok? "DONE" "OK"))))
+                                   :on-key      (fn [e]
+                                                  (when (#{:enter " "} (:key e))
+                                                    (elements/transact! this [(set-ok {})])
+                                                    :handled))
+                                   :on-activate (fn [] (elements/transact! this [(set-ok {})]))}
+                                  (if ok? "DONE" "OK"))))
 
 (defn- new-app []
   (app/application {:root-class Root :initial-state true}))
@@ -54,10 +54,10 @@
    :ident         (fn [] [:component/id ::vproot])
    :initial-state {:vp/x 1}}
   (elements/vbox {:id "root"}
-            (elements/viewport {:id :list :height 4}
-                          (elements/vbox {}
-                                    (for [i (range 10)]
-                                      (elements/button {:id (keyword (str "item-" i))} (str "Item " i)))))))
+                 (elements/viewport {:id :list :height 4}
+                                    (elements/vbox {}
+                                                   (for [i (range 10)]
+                                                     (elements/button {:id (keyword (str "item-" i))} (str "Item " i)))))))
 
 (defn- new-vp-app []
   (app/application {:root-class VPRoot :initial-state true}))
@@ -71,23 +71,23 @@
    :ident         (fn [] [:component/id ::mlroot])
    :initial-state {:ml/notes ""}}
   (elements/vbox {:id "root"}
-            (elements/input {:id        :notes
-                        :multiline? true
-                        :height    3
-                        :width     9
-                        :value     notes
-                        :on-change (fn [v _caret] (elements/transact! this [(set-notes {:v v})]))})))
+                 (elements/input {:id        :notes
+                                  :multiline? true
+                                  :height    3
+                                  :width     9
+                                  :value     notes
+                                  :on-change (fn [v _caret] (elements/transact! this [(set-notes {:v v})]))})))
 
 (defn- new-ml-app []
   (app/application {:root-class MLRoot :initial-state true}))
 
 ;; ---------------------------------------------------------------------------
 
-(specification {:covers {`app/application      "598adf,cedfc3"
-                         `app/attach!          "8595fd,c2dda5"
-                         `app/render!          "90d81f,c453ec"
-                         `app/screen-of        "f2651c,662c58"
-                         `app/screen-styled-of "bac68a,5083b1"
+(specification {:covers {`app/application      "203757,f93470"
+                         `app/attach!          "7acff7,712c35"
+                         `app/render!          "835cc1,9c4e36"
+                         `app/screen-of        "0ca459,662c58"
+                         `app/screen-styled-of "3815eb,5083b1"
                          `app/terminal         "18f70c,089ec1"}} "application / attach! (initial paint)"
                (let [app (new-app)
                      t   (term/string-terminal {:rows 10 :cols 30})]
@@ -111,7 +111,7 @@
                     "the hardware cursor is shown at input :a's caret origin (0,0)"
                     (term/cursor t) => {:x 0 :y 0 :visible? true}))))
 
-(specification {:covers {`app/step! "32154f,041d52"}} "step! — focus, typing, and activation"
+(specification {:covers {`app/step! "3bef92,e3f20e"}} "step! — focus, typing, and activation"
                (component "Tab moves focus and follows the cursor to the newly focused input"
                           (let [app (new-app)
                                 t   (term/string-terminal {:rows 10 :cols 30})]
@@ -155,8 +155,8 @@
                              "the repaint shows the button's updated label"
                              (nth (app/screen-of app) 2) => "DONE                          "))))
 
-(specification {:covers {`app/render!          "90d81f,c453ec"
-                         `app/too-small-buffer "81d757,220fc4"}} "render! — diff path & resize"
+(specification {:covers {`app/render!          "835cc1,9c4e36"
+                         `app/too-small-buffer "6bd38f,f40ebc"}} "render! — diff path & resize"
                (component "a no-op re-render produces no terminal output"
                           (let [app (new-app)
                                 t   (term/string-terminal {:rows 10 :cols 30})]
@@ -197,8 +197,8 @@
                                (str/includes? (first scr) "too small") => true
                                (str/includes? (first scr) "10x5") => true)))))
 
-(specification {:covers {`app/step! "32154f,041d52"
-                         `app/follow-focus! "a7ce94,259142"}} "viewport scrolling, follow-focus, and cursor tracking"
+(specification {:covers {`app/step! "3bef92,e3f20e"
+                         `app/follow-focus! "f2b69d,259142"}} "viewport scrolling, follow-focus, and cursor tracking"
                (component "Tab into the list auto-scrolls the viewport so the focused item stays visible"
                           (let [app (new-vp-app)
                                 t   (term/string-terminal {:rows 8 :cols 12})]
@@ -326,9 +326,9 @@
                              "scrolling back up reveals the first wrapped row again"
                              (first (app/screen-of app)) => "the quick   "))))
 
-(specification {:covers {`app/mount! "fb742f,51525a"
-                         `app/run-blocking! "a8159d,95073d"
-                         `app/quit!  "acaa83,a354d9"}} "mount! / run! — input loop"
+(specification {:covers {`app/mount! "8b44a7,9fe936"
+                         `app/run-blocking! "a8159d,32ca36"
+                         `app/quit!  "aa6cd2,a354d9"}} "mount! / run! — input loop"
                (component "run! with a finite key script processes the keys and ends, leaving the terminal"
                           (let [app (new-app)
                                 t   (term/string-terminal {:rows 10 :cols 30
@@ -363,7 +363,7 @@
                                                              :keys [{:key "q" :char "q" :ctrl? true}
                                                                     {:key "Z" :char "Z"}]})]
                             (app/run-blocking! app {:terminal      t
-                                                       :global-keymap {[:ctrl "q"] (fn [a _e] (reset! fired true) (app/quit! a))}})
+                                                    :global-keymap {[:ctrl "q"] (fn [a _e] (reset! fired true) (app/quit! a))}})
                             (assertions
                              "the global chord handler fired for the ctrl-q chord"
                              @fired => true
@@ -385,23 +385,23 @@
    :ident         (fn [] [:component/id ::pkroot])
    :initial-state {:pk/open? false :pk/choice nil}}
   (elements/vbox {:id "root"}
-            (elements/button {:id :launch :on-activate (fn [] (elements/transact! this [(open-picker {})]))}
-                        (str "Choice: " (or choice "none")))
-            (elements/button {:id :other} "Other")
-            (elements/picker {:id        :fruit
-                         :open?     open?
-                         :title     "Fruit"
-                         :width     16
-                         :height    6
-                         :options   (mapv (fn [i] {:value (keyword (str "f" i)) :label (str "Fruit " i)}) (range 10))
-                         :on-select (fn [v] (elements/transact! this [(pick {:v v})]))
-                         :on-cancel (fn [] (elements/transact! this [(close-picker {})]))})))
+                 (elements/button {:id :launch :on-activate (fn [] (elements/transact! this [(open-picker {})]))}
+                                  (str "Choice: " (or choice "none")))
+                 (elements/button {:id :other} "Other")
+                 (elements/picker {:id        :fruit
+                                   :open?     open?
+                                   :title     "Fruit"
+                                   :width     16
+                                   :height    6
+                                   :options   (mapv (fn [i] {:value (keyword (str "f" i)) :label (str "Fruit " i)}) (range 10))
+                                   :on-select (fn [v] (elements/transact! this [(pick {:v v})]))
+                                   :on-cancel (fn [] (elements/transact! this [(close-picker {})]))})))
 
 (defn- new-picker-app []
   (app/application {:root-class PickerRoot :initial-state true}))
 
-(specification {:covers {`app/render! "90d81f,c453ec"
-                         `app/step!   "32154f,041d52"}} "overlay compositing & focus trap"
+(specification {:covers {`app/render! "835cc1,9c4e36"
+                         `app/step!   "3bef92,e3f20e"}} "overlay compositing & focus trap"
                (component "while the picker is closed only the base UI is focusable and painted"
                           (let [app (new-picker-app)
                                 t   (term/string-terminal {:rows 10 :cols 24})]
@@ -452,8 +452,8 @@
                                "the base UI paints un-obscured again (no modal border on screen)"
                                (str/includes? (apply str scr) "Fruit") => false)))))
 
-(specification {:covers {`app/step!         "32154f,041d52"
-                         `app/follow-focus! "a7ce94,259142"}} "picker scrolling and selection"
+(specification {:covers {`app/step!         "3bef92,e3f20e"
+                         `app/follow-focus! "f2b69d,259142"}} "picker scrolling and selection"
                (component "arrowing down past the visible rows auto-scrolls the picker's viewport"
                           (let [app (new-picker-app)
                                 t   (term/string-terminal {:rows 10 :cols 24})]
@@ -486,3 +486,67 @@
                              (engine/current-focus app) => :launch
                              "the base UI reflects the chosen value"
                              (str/starts-with? (nth (app/screen-of app) 0) "Choice: :f1") => true))))
+
+;; ---------------------------------------------------------------------------
+;; Entrypoint niceties: start!, app-level global-keymap, lifecycle (C1/C2).
+;; ---------------------------------------------------------------------------
+
+(specification {:covers {`app/start! "f91686,291564"}} "start! — build + run in one call"
+               (component "start! builds the app (application) and runs it to completion (run-blocking!)"
+                          (let [t      (term/string-terminal {:rows 10 :cols 30
+                                                              :keys [{:key "H" :char "H"}
+                                                                     {:key "i" :char "i"}]})
+                                handle (app/start! {:root-class Root :initial-state true} {:terminal t})]
+                            (assertions
+                             "the built app processed the scripted keys (state reflects the typed text)"
+                             (:app/a (state (:app handle))) => "Hi"
+                             "the loop ran to completion and left the terminal"
+                             (:left? @(.-state t)) => true))))
+
+(specification "entrypoint lifecycle — resize-unregister (C1), loop catch (C2), app-level global-keymap"
+               (component "quit! unregisters the resize handler, so a later resize does not repaint the terminal (C1)"
+                          (let [app (new-app)
+                                t   (term/string-terminal {:rows 10 :cols 30})]
+                            (app/attach! app t)
+                            (let [before (count (term/output t))]
+                              (term/resize! t 12 40)
+                              (let [after-active (count (term/output t))]
+                                (app/quit! app)
+                                (let [post-quit (count (term/output t))]
+                                  (term/resize! t 8 20)
+                                  (assertions
+                                   "while attached, a resize repaints (terminal output grows)"
+                                   (> after-active before) => true
+                                   "after quit!, a resize produces no further output (handler was cleared)"
+                                   (count (term/output t)) => post-quit))))))
+
+               (component "an exception in the input loop is caught, stashed on the handle :error, and passed to :on-error (C2)"
+                          (let [app    (new-app)
+                                seen   (atom nil)
+                                boom   (ex-info "boom" {})
+                                t      (term/string-terminal {:rows 10 :cols 30
+                                                              :keys [{:key "q" :char "q" :ctrl? true}]})
+                                handle (app/run-blocking! app {:terminal      t
+                                                               :global-keymap {[:ctrl "q"] (fn [_a _e] (throw boom))}
+                                                               :on-error      (fn [_app th] (reset! seen th))})]
+                            (assertions
+                             "the throwable is stashed on the handle's :error atom"
+                             (deref (:error handle)) => boom
+                             ":on-error receives the throwable"
+                             @seen => boom
+                             "the terminal is still left despite the error"
+                             (:left? @(.-state t)) => true)))
+
+               (component "a :global-keymap registered at application time is used when run-blocking! is given none"
+                          (let [fired (atom false)
+                                app   (app/application {:root-class    Root :initial-state true
+                                                        :global-keymap {[:ctrl "q"] (fn [a _e] (reset! fired true) (app/quit! a))}})
+                                t     (term/string-terminal {:rows 10 :cols 30
+                                                             :keys [{:key "q" :char "q" :ctrl? true}
+                                                                    {:key "Z" :char "Z"}]})]
+                            (app/run-blocking! app {:terminal t})
+                            (assertions
+                             "the app-level keymap fires the reserved chord"
+                             @fired => true
+                             "the loop stopped and left the terminal"
+                             (:left? @(.-state t)) => true))))

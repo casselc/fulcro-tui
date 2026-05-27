@@ -45,6 +45,7 @@
 (>def ::placed (? map?))
 (>def ::last-size (? map?))
 (>def ::handle map?)
+(>def ::global-keymap (? map?))
 (>def ::min-size (s/keys :req-un [::min-width ::min-height]))
 (>def ::min-width int?)
 (>def ::min-height int?)
@@ -416,19 +417,30 @@
 (>defn mount!
        "Attaches a terminal to `app` and starts the keyboard input loop on a new thread. `opts`:
 
-     * `:terminal` - the `Terminal` to drive (default `(term/jline-terminal)`; tests pass a
-       `string-terminal`).
+     * `:terminal`      - the `Terminal` to drive (default `(term/jline-terminal)`; tests pass a
+                          `string-terminal`).
+     * `:global-keymap` - optional map of `key-chord` -> `(fn [app key-event])`. These reserved
+                          chords (e.g. a quit chord) are dispatched at the loop level so they fire
+                          regardless of which node has focus; everything else goes through the
+                          focus/input pipeline (`step!`). Defaults to the keymap registered on the
+                          app at `application`/`start!` time (`::global-keymap`), if any.
+     * `:on-error`      - optional `(fn [app throwable])` called if the input loop throws. The loop
+                          always also stashes the throwable on the handle's `:error` atom and leaves
+                          the terminal.
 
-   Returns a handle map `{:app :terminal :thread :running?}` where `:running?` is an atom that, when
-   set false, stops the loop. The loop reads keys with `term/t-read-key`; a `nil` (EOF) read or
-   `:running?` becoming false terminates it; `term/t-leave!` is always called on exit."
+   Returns a handle map `{:app :terminal :thread :running? :error}`. `:running?` is an atom that, when
+   set false, stops the loop; `:error` is an atom holding any uncaught loop exception (else `nil`).
+   The loop reads keys with `term/t-read-key`; a `nil` (EOF) read or `:running?` becoming false
+   terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
        ([app]
         [any? => ::handle]
         (mount! app {}))
-       ([app {:keys [terminal global-keymap]}]
+       ([app {:keys [terminal global-keymap on-error]}]
         [any? map? => ::handle]
-        (let [terminal (or terminal (term/jline-terminal))
-              running? (atom true)]
+        (let [terminal      (or terminal (term/jline-terminal))
+              global-keymap (or global-keymap (::global-keymap (runtime app)))
+              running?      (atom true)
+              error         (atom nil)]
           (attach! app terminal)
           (let [loop-fn (fn input-loop []
                           (try
@@ -443,10 +455,16 @@
                                       (h app k)
                                       (step! app k))
                                     (recur)))))
+                            ;; C2: an uncaught exception must NOT silently kill the thread and make
+                            ;; `run-blocking!`'s join look like a clean exit. Stash it on the handle's
+                            ;; `:error` atom and hand it to `:on-error` (if supplied) so callers can see it.
+                            (catch Throwable t
+                              (reset! error t)
+                              (when on-error (try (on-error app t) (catch Throwable _ nil))))
                             (finally
                               (term/t-leave! terminal))))
                 thread  (Thread. ^Runnable loop-fn "fulcro-tui-input-loop")
-                handle  {:app app :terminal terminal :thread thread :running? running?}]
+                handle  {:app app :terminal terminal :thread thread :running? running? :error error}]
             (swap! (:com.fulcrologic.fulcro.application/runtime-atom app) assoc ::handle handle)
             (.start thread)
             handle))))
@@ -465,9 +483,20 @@
           handle)))
 
 (>defn quit!
-       "Stops the input loop for a `mount!`/`run!` `handle` (or, given an `app`, looks up its terminal):
-   sets `:running?` false, best-effort interrupts the loop thread, and leaves the terminal. Returns
-   `handle-or-app`."
+       "Stops the input loop for a `mount!`/`run-blocking!` `handle` (or, given an `app`, looks up its
+   handle/terminal). Returns `handle-or-app`. Steps, in order:
+
+     1. Sets `:running?` false (so the loop won't process the next key).
+     2. Unregisters the terminal's resize handler (`t-on-resize!` with `nil`) — otherwise a stray
+        SIGWINCH delivered after the terminal is closed would invoke `render!` against a closed
+        terminal (C1).
+     3. Leaves the terminal (`t-leave!`). For a real JLine terminal this CLOSES the terminal, which
+        forces a thread parked in the blocking `t-read-key` to return EOF — this (not the interrupt)
+        is what actually unblocks and ends a programmatically-quit loop (C3).
+     4. Best-effort `.interrupt` of the loop thread as a fallback.
+
+   Residual limitation: unblocking the blocked read depends on JLine closing the input on `.close`;
+   if a transport does not, the loop ends on the next keypress/EOF instead."
        [handle-or-app]
        [any? => any?]
        (let [handle (cond
@@ -476,9 +505,12 @@
                                     deref ::handle))
              {:keys [^Thread thread running? terminal]} (or handle {:terminal (terminal handle-or-app)})]
          (when running? (reset! running? false))
-         (when thread (.interrupt thread))
          (when terminal
+           ;; C1: drop the resize handler BEFORE closing, so a concurrent SIGWINCH can't paint a
+           ;; closed terminal. Then C3: t-leave! closes it, forcing the blocked read to EOF.
+           (try (term/t-on-resize! terminal nil) (catch Throwable _ nil))
            (try (term/t-leave! terminal) (catch Throwable _ nil)))
+         (when thread (.interrupt thread))
          handle-or-app))
 
 ;; ============================================================================
@@ -498,6 +530,9 @@
      * `:initial-state` - (default true) initialize app state from `root-class`'s `:initial-state`.
                           Pass `false` to skip (advanced: e.g. you intend to install state yourself).
      * `:remotes`       - optional Fulcro remotes map.
+     * `:global-keymap` - optional default `key-chord` -> `(fn [app key-event])` map registered on the
+                          app; `mount!`/`run-blocking!`/`start!` use it unless they are passed their
+                          own `:global-keymap`. Handy for a quit chord without repeating it per run.
      * `:inspect?`      - DEBUG ONLY (JVM, not babashka). When truthy, attaches Fulcro Inspect so a
                           running standalone Inspect (Electron) app on localhost:8237 observes this
                           app's transactions / network / state. Defaults to the `tui.inspect` system
@@ -507,7 +542,7 @@
                           and babashka runs never load it (and its devtools deps stay off the path).
 
    No terminal is attached here; attach one with `attach!`/`mount!`."
-       [{:keys [root-class remotes inspect?]
+       [{:keys [root-class remotes inspect? global-keymap]
          :or   {inspect? (= "true" (System/getProperty "tui.inspect"))}
          :as   opts}]
        [map? => any?]
@@ -524,9 +559,25 @@
          ;; explicitly opts out with `:initial-state false`.
          (when (get opts :initial-state true)
            (rapp/initialize-state! app root-class))
+         (when global-keymap
+           (swap! (runtime-atom-key app) assoc ::global-keymap global-keymap))
          (when inspect?
            ((requiring-resolve 'com.fulcrologic.fulcro.tui.inspect/add-inspect!) app))
          app))
+
+(>defn start!
+       "Builds an `application` and runs it to completion in one call — the convenience entrypoint for
+   the common case. `(start! app-opts)` or `(start! app-opts run-opts)` is equivalent to
+   `(run-blocking! (application app-opts) run-opts)`. `app-opts` are `application`'s options
+   (`:root-class`, `:initial-state`, `:remotes`, `:global-keymap`, `:inspect?`); `run-opts` are
+   `mount!`'s (`:terminal`, `:global-keymap`, `:on-error`). Blocks until the loop ends (EOF/`quit!`).
+   Returns the handle."
+       ([app-opts]
+        [map? => ::handle]
+        (start! app-opts {}))
+       ([app-opts run-opts]
+        [map? map? => ::handle]
+        (run-blocking! (application app-opts) run-opts)))
 
 ;; ============================================================================
 ;; Inspection helpers (tests / REPL)

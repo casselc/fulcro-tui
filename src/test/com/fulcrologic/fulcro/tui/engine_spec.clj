@@ -1,4 +1,4 @@
-(ns com.fulcrologic.fulcro.tui-spec
+(ns com.fulcrologic.fulcro.tui.engine-spec
   (:require
    [clojure.string :as str]
    [com.fulcrologic.fulcro.algorithms.tx-processing.synchronous-tx-processing :as stx]
@@ -26,8 +26,8 @@
   {:query [:c/title {:c/leaf (rc/get-query Leaf)}]
    :ident :c/title}
   (elements/vbox {:id "root"}
-            (elements/text {:id "title"} title)
-            (ui-leaf leaf {:on-select (fn [] :selected)})))
+                 (elements/text {:id "title"} title)
+                 (ui-leaf leaf {:on-select (fn [] :selected)})))
 
 (comp/defsc Plain [this {:keys [p/id p/label]}]
   {:query [:p/id :p/label]
@@ -50,53 +50,6 @@
                 "is false for non-map values"
                 (engine/node? "x") => false
                 (engine/node? nil) => false))
-
-(specification {:covers {`elements/element "0b6694,464bda"}} "element generators"
-               (component "attribute handling"
-                          (assertions
-                           "uses a leading map as the node's attributes"
-                           (::engine/attrs (elements/vbox {:width 3} "x")) => {:width 3}
-                           "defaults attributes to an empty map when the first arg is not a map"
-                           (::engine/attrs (elements/vbox "x")) => {}))
-
-               (component "children"
-                          (assertions
-                           "keeps node and string children in order"
-                           (::engine/children (elements/vbox {} "a" (elements/text {} "b"))) => ["a" (elements/text {} "b")]
-                           "flattens nested sequences spliced into the children"
-                           (::engine/children (elements/vbox {} (list "a" "b") "c")) => ["a" "b" "c"]
-                           "removes nil children"
-                           (::engine/children (elements/vbox {} "a" nil "b")) => ["a" "b"]))
-
-               (component "tags"
-                          (assertions
-                           "each generator stamps its own tag"
-                           (::engine/tag (elements/vbox)) => :vbox
-                           (::engine/tag (elements/hbox)) => :hbox
-                           (::engine/tag (elements/box)) => :box
-                           (::engine/tag (elements/text)) => :text
-                           (::engine/tag (elements/button)) => :button
-                           (::engine/tag (elements/line)) => :line
-                           (::engine/tag (elements/viewport)) => :viewport
-                           (::engine/tag (elements/modal {})) => :modal))
-
-               (component "input"
-                          (assertions
-                           "is a childless leaf carrying only its attributes"
-                           (elements/input {:id :x :value "hi"})
-                           => {::engine/tag :input ::engine/attrs {:id :x :value "hi"} ::engine/children []}))
-
-               (component "modal"
-                          (assertions
-                           "passes through its :id and :open? attributes"
-                           (engine/node-attr (elements/modal {:id :dlg :open? true}) :id) => :dlg
-                           (engine/node-attr (elements/modal {:id :dlg :open? true}) :open?) => true
-                           "defaults :border? to true"
-                           (engine/node-attr (elements/modal {:id :d}) :border?) => true
-                           "lets a caller override the border default"
-                           (engine/node-attr (elements/modal {:id :d :border? false}) :border?) => false
-                           "keeps its children (stacked like a vbox)"
-                           (mapv ::engine/tag (::engine/children (elements/modal {:id :d} (elements/text {} "hi")))) => [:text])))
 
 (specification {:covers {`engine/code-point-width "bb5a0d,d044cd"}} "code-point-width"
                (assertions
@@ -124,7 +77,7 @@
                 "is zero for the empty string"
                 (engine/string-width "") => 0))
 
-(specification {:covers {`engine/wrap-text "386083,30a362"}} "wrap-text"
+(specification {:covers {`engine/wrap-text "386083,ef97f4"}} "wrap-text"
                (component "short text fits on one line"
                           (assertions
                            "text narrower than the width is a single line"
@@ -186,7 +139,7 @@
 (specification "wrapping text layout (height-for-width)"
                (component "place in a vbox: height is the wrapped line count at the container width"
                           (let [placed (engine/place (elements/vbox {} (elements/text {:wrap true} "the quick brown fox jumps"))
-                                                  {:x 0 :y 0 :w 9 :h 10})
+                                                     {:x 0 :y 0 :w 9 :h 10})
                                 child  (first (::engine/children placed))]
                             (assertions
                              "the wrapping text fills the container width on the cross axis"
@@ -197,7 +150,7 @@
 
                (component "render-buffer paints the wrapped lines into the rect (clipped)"
                           (let [placed (engine/place (elements/vbox {} (elements/text {:wrap true} "the quick brown fox jumps"))
-                                                  {:x 0 :y 0 :w 9 :h 10})
+                                                     {:x 0 :y 0 :w 9 :h 10})
                                 buf    (engine/render-buffer placed 4 9)]
                             (assertions
                              "successive wrapped lines render on successive rows"
@@ -206,7 +159,7 @@
                (component "a long wrapped paragraph inside a viewport wraps and scrolls"
                           (let [para   "the quick brown fox jumps over the lazy dog"
                                 placed (engine/place (elements/viewport {:id :vp :height 3} (elements/text {:wrap true} para))
-                                                  {:x 0 :y 0 :w 9 :h 3})]
+                                                     {:x 0 :y 0 :w 9 :h 3})]
                             (assertions
                              "the viewport's virtual height is the wrapped line count at its content width"
                              (:h (::engine/virtual-size placed)) => (count (engine/wrap-text para 9))
@@ -256,7 +209,7 @@
   [placed]
   (mapv ::engine/rect (::engine/children placed)))
 
-(specification {:covers {`engine/place "b3e3fa,e5243f"}} "place"
+(specification {:covers {`engine/place "b3e3fa,590943"}} "place"
                (component "the node's own rect"
                           (assertions
                            "is the outer rect it was placed in"
@@ -266,46 +219,46 @@
                           (assertions
                            "places fixed-height children sequentially, filling width on the cross axis"
                            (child-rects (engine/place (elements/vbox {} (elements/text {:height 1} "a") (elements/text {:height 2} "b"))
-                                                   {:x 0 :y 0 :w 10 :h 4}))
+                                                      {:x 0 :y 0 :w 10 :h 4}))
                            => [{:x 0 :y 0 :w 10 :h 1} {:x 0 :y 1 :w 10 :h 2}]
                            "gives a :grow child the height left over after a fixed child"
                            (child-rects (engine/place (elements/vbox {} (elements/text {:height 1} "h") (elements/text {:grow 1} "body"))
-                                                   {:x 0 :y 0 :w 6 :h 5}))
+                                                      {:x 0 :y 0 :w 6 :h 5}))
                            => [{:x 0 :y 0 :w 6 :h 1} {:x 0 :y 1 :w 6 :h 4}]
                            "splits leftover height evenly between two equal-weight grow children"
                            (mapv :h (child-rects (engine/place (elements/vbox {} (elements/text {:grow 1} "a") (elements/text {:grow 1} "b"))
-                                                            {:x 0 :y 0 :w 4 :h 4})))
+                                                               {:x 0 :y 0 :w 4 :h 4})))
                            => [2 2]))
 
                (component "hbox stacking (horizontal)"
                           (assertions
                            "gives a fixed-width sidebar its width and the rest to a grow child"
                            (mapv :w (child-rects (engine/place (elements/hbox {} (elements/box {:width 3}) (elements/box {:grow 1}))
-                                                            {:x 0 :y 0 :w 10 :h 2})))
+                                                               {:x 0 :y 0 :w 10 :h 2})))
                            => [3 7]
                            "splits width between two :half children"
                            (mapv :w (child-rects (engine/place (elements/hbox {} (elements/box {:width :half}) (elements/box {:width :half}))
-                                                            {:x 0 :y 0 :w 10 :h 2})))
+                                                               {:x 0 :y 0 :w 10 :h 2})))
                            => [5 5]))
 
                (component "cross-axis alignment"
                           (assertions
                            "centers a narrower child within the container width"
                            (::engine/rect (first (::engine/children
-                                               (engine/place (elements/vbox {} (elements/text {:width 4 :align :center} "x"))
-                                                          {:x 0 :y 0 :w 10 :h 1}))))
+                                                  (engine/place (elements/vbox {} (elements/text {:width 4 :align :center} "x"))
+                                                                {:x 0 :y 0 :w 10 :h 1}))))
                            => {:x 3 :y 0 :w 4 :h 1}))
 
                (component "insets"
                           (assertions
                            "a border insets the content area by one cell on each edge"
                            (child-rects (engine/place (elements/vbox {:border? true} (elements/text {} "x"))
-                                                   {:x 0 :y 0 :w 5 :h 3}))
+                                                      {:x 0 :y 0 :w 5 :h 3}))
                            => [{:x 1 :y 1 :w 3 :h 1}]))
 
                (component "viewport"
                           (let [tall   (elements/vbox {} (elements/text {} "L0") (elements/text {} "L1") (elements/text {} "L2")
-                                                 (elements/text {} "L3") (elements/text {} "L4"))
+                                                      (elements/text {} "L3") (elements/text {} "L4"))
                                 placed (engine/place (elements/viewport {:id :vp :height 3} tall) {:x 0 :y 0 :w 4 :h 3})]
                             (assertions
                              "lays its single child out at the child's NATURAL height (taller than the viewport)"
@@ -367,10 +320,10 @@
 (specification {:covers {`engine/placed-viewports "ade25c,96f37e"
                          `engine/focus-viewport-context "e6a13e,ca8114"}} "placed-viewports / focus-viewport-context"
                (let [tree   (elements/vbox {:id "root"}
-                                      (elements/text {} "hdr")
-                                      (elements/viewport {:id :vp}
-                                                    (elements/vbox {} (elements/button {:id :i0} "I0") (elements/button {:id :i1} "I1")
-                                                              (elements/button {:id :i2} "I2") (elements/button {:id :i3} "I3"))))
+                                           (elements/text {} "hdr")
+                                           (elements/viewport {:id :vp}
+                                                              (elements/vbox {} (elements/button {:id :i0} "I0") (elements/button {:id :i1} "I1")
+                                                                             (elements/button {:id :i2} "I2") (elements/button {:id :i3} "I3"))))
                      placed (engine/place tree {:x 0 :y 0 :w 6 :h 3})]
                  (component "placed-viewports"
                             (assertions
@@ -478,14 +431,14 @@
                 "yields the reset sequence for an empty codes vector"
                 (engine/sgr-string []) => "[0m"))
 
-(specification {:covers {`engine/render-buffer "e06fec,d0d0e6"
-                         `engine/paint        "9cb0a6,ac1e59"}} "render-buffer / paint"
+(specification {:covers {`engine/render-buffer "e06fec,f835b1"
+                         `engine/paint        "9cb0a6,dc3f9b"}} "render-buffer / paint"
                (component "stacked leaves"
                           (let [tree (engine/place (elements/vbox {}
-                                                          (elements/text {} "Hello")
-                                                          (elements/button {:highlight true} "OK")
-                                                          (elements/line {}))
-                                                {:x 0 :y 0 :w 6 :h 3})
+                                                                  (elements/text {} "Hello")
+                                                                  (elements/button {:highlight true} "OK")
+                                                                  (elements/line {}))
+                                                   {:x 0 :y 0 :w 6 :h 3})
                                 buf  (engine/render-buffer tree 3 6)]
                             (assertions
                              "paints text, a button label, and a horizontal rule on successive rows"
@@ -514,14 +467,14 @@
 
                (component "border drawing"
                           (let [buf (engine/render-buffer (engine/place (elements/box {:border? true} (elements/text {} "x"))
-                                                                  {:x 0 :y 0 :w 5 :h 3}) 3 5)]
+                                                                        {:x 0 :y 0 :w 5 :h 3}) 3 5)]
                             (assertions
                              "draws box-drawing corners and edges around the outer rect with the child inside"
                              (engine/screen buf) => ["┌───┐" "│x  │" "└───┘"])))
 
                (component "background fill"
                           (let [buf (engine/render-buffer (engine/place (elements/box {:bg :blue :width 2 :height 1})
-                                                                  {:x 0 :y 0 :w 2 :h 1}) 1 2)]
+                                                                        {:x 0 :y 0 :w 2 :h 1}) 1 2)]
                             (assertions
                              "fills the content rect with the background style when :bg is set"
                              (mapv :sgr (first (engine/screen-styled buf))) => [{:bg :blue} {:bg :blue}])))
@@ -529,14 +482,14 @@
                (component "child clipping to parent"
                           (let [buf (engine/render-buffer
                                      (engine/place (elements/box {:width 3 :height 1} (elements/text {} "ABCDEFG"))
-                                                {:x 0 :y 0 :w 3 :h 1}) 1 6)]
+                                                   {:x 0 :y 0 :w 3 :h 1}) 1 6)]
                             (assertions
                              "a child cannot paint outside its parent's rect"
                              (engine/screen buf) => ["ABC   "])))
 
                (component "viewport scrolling"
                           (let [tall   (elements/vbox {} (elements/text {} "AA") (elements/text {} "BB") (elements/text {} "CC")
-                                                 (elements/text {} "DD") (elements/text {} "EE"))
+                                                      (elements/text {} "DD") (elements/text {} "EE"))
                                 placed (engine/place (elements/viewport {:id :vp :height 3} tall) {:x 0 :y 0 :w 2 :h 3})]
                             (assertions
                              "with scroll {:y 0} the top rows of the (taller) child are shown"
@@ -548,16 +501,16 @@
 
                (component "viewport content is clipped to the viewport rect"
                           (let [tall   (elements/vbox {} (elements/text {} "WIDE0") (elements/text {} "WIDE1") (elements/text {} "WIDE2")
-                                                 (elements/text {} "WIDE3") (elements/text {} "WIDE4"))
+                                                      (elements/text {} "WIDE3") (elements/text {} "WIDE4"))
           ;; viewport content area is 3 wide x 2 tall; place it offset into a larger buffer
                                 placed (engine/place (elements/viewport {:id :vp :width 3 :height 2} tall) {:x 1 :y 1 :w 3 :h 2})
                                 buf    (engine/render-buffer placed 4 6)]
                             (assertions
                              "rows above/below and columns left/right of the viewport stay blank (content cannot leak out)"
                              (engine/screen buf) => ["      "
-                                                  " WID  "
-                                                  " WID  "
-                                                  "      "])))
+                                                     " WID  "
+                                                     " WID  "
+                                                     "      "])))
 
                (component "viewport border is drawn on the outer rect"
                           (let [tall   (elements/vbox {} (elements/text {} "rr") (elements/text {} "ss") (elements/text {} "tt") (elements/text {} "uu"))
@@ -620,7 +573,7 @@
                              "emits a full repaint when prev has different dimensions"
                              (engine/diff (engine/make-buffer 2 5) ab) => [{:row 0 :col 0 :sgr [] :text "abc"}]))))
 
-(specification {:covers {`engine/ops->ansi "856e75,2ef542"}} "ops->ansi"
+(specification {:covers {`engine/ops->ansi "856e75,5e36b9"}} "ops->ansi"
                (assertions
                 "emits a cursor move (row+1;col+1) then an SGR then the text"
                 (engine/ops->ansi [{:row 1 :col 2 :sgr [31] :text "hi"}]) => "[2;3H[31mhi[0m"
@@ -639,7 +592,7 @@
                 "returns the empty string for no ops"
                 (engine/ops->ansi []) => ""))
 
-(specification {:covers {`engine/frame->ansi "9eafc2,5c8058"}} "frame->ansi"
+(specification {:covers {`engine/frame->ansi "9eafc2,a5ab29"}} "frame->ansi"
                (let [b1  (engine/make-buffer 1 5)
                      nxt (engine/put-str b1 0 0 "X" {} {:x 0 :y 0 :w 5 :h 1})]
                  (assertions
@@ -648,7 +601,7 @@
                   "does not wrap the diff when :sync? is false"
                   (engine/frame->ansi b1 nxt {:sync? false}) => "[1;1HX")))
 
-(specification {:covers {`engine/frame->ansi "9eafc2,5c8058"}} "frame->ansi — clear-screen on resize"
+(specification {:covers {`engine/frame->ansi "9eafc2,a5ab29"}} "frame->ansi — clear-screen on resize"
                (let [b1  (engine/make-buffer 1 5)
                      nxt (engine/put-str b1 0 0 "X" {} {:x 0 :y 0 :w 5 :h 1})]
                  (assertions
@@ -693,7 +646,7 @@
                   "calls the class :render, returning its node with props flowing in"
                   (engine/render-instance instance) => (elements/button {:id "plain-3"} "Click"))))
 
-(specification {:covers {`engine/render-tree "4667e2,5c2dd7"}} "render-tree"
+(specification {:covers {`engine/render-tree "2ad3f6,408f57"}} "render-tree"
                (component "scalars and nil"
                           (assertions
                            "passes a string through unchanged"
@@ -708,8 +661,8 @@
                            (engine/render-tree (elements/text {:id "t"} "x")) => (elements/text {:id "t"} "x")))
                (component "component instances"
                           (let [tree (engine/render-root Container
-                                                      {:c/title "Hello"
-                                                       :c/leaf  {:leaf/id 1 :leaf/label "Press"}})]
+                                                         {:c/title "Hello"
+                                                          :c/leaf  {:leaf/id 1 :leaf/label "Press"}})]
                             (assertions
                              "produces a node tree for place"
                              (engine/node? tree) => true
@@ -726,7 +679,7 @@
                              "a render returning a vector yields a vector of sibling nodes"
                              tree => [(elements/text {} "a") (elements/text {} "b")]))))
 
-(specification {:covers {`engine/render-root "156754,c1c98b"}} "render-root"
+(specification {:covers {`engine/render-root "b79137,64eef5"}} "render-root"
                (let [tree (engine/render-root Plain {:p/id 5 :p/label "Root"})]
                  (assertions
                   "builds the root instance via factory and walks it to a pure node tree"
@@ -743,9 +696,9 @@
 
 (specification {:covers {`engine/find-by-id "3fafe1,8ae121"}} "find-by-id"
                (let [tree (elements/vbox {:id "root"}
-                                    (elements/text {:id "a"} "A")
-                                    (elements/hbox {:id "mid"}
-                                              (elements/button {:id "target"} "hit")))]
+                                         (elements/text {:id "a"} "A")
+                                         (elements/hbox {:id "mid"}
+                                                        (elements/button {:id "target"} "hit")))]
                  (assertions
                   "finds a deeply nested node by its :id"
                   (engine/find-by-id tree "target") => (elements/button {:id "target"} "hit")
@@ -756,8 +709,8 @@
 
 (specification {:covers {`engine/node-text "752bdf,75544d"}} "node-text"
                (let [tree (elements/vbox {}
-                                    (elements/text {} "Hello ")
-                                    (elements/hbox {} (elements/text {} "wor") "ld"))]
+                                         (elements/text {} "Hello ")
+                                         (elements/hbox {} (elements/text {} "wor") "ld"))]
                  (assertions
                   "concatenates the text of a node and all its descendants"
                   (engine/node-text tree) => "Hello world"
@@ -803,7 +756,7 @@
 ;; Focus, input & key dispatch
 ;; ===========================================================================
 
-(specification {:covers {`engine/wrap-layout "f43751,a6cfe3"}} "wrap-layout"
+(specification {:covers {`engine/wrap-layout "f43751,6d2e82"}} "wrap-layout"
                (assertions
                 "records each wrapped row's text, start caret index, and consumed length"
                 (engine/wrap-layout "the quick brown fox" 9)
@@ -820,8 +773,8 @@
                 "puts a trailing newline's empty line after the content"
                 (engine/wrap-layout "ab\n" 9) => [{:start 0 :len 2 :text "ab"} {:start 3 :len 0 :text ""}]))
 
-(specification {:covers {`engine/caret->rowcol "17bca2,957be0"
-                         `engine/rowcol->caret "2b265f,957be0"}} "caret <-> rowcol"
+(specification {:covers {`engine/caret->rowcol "17bca2,ee2367"
+                         `engine/rowcol->caret "2b265f,ee2367"}} "caret <-> rowcol"
                (let [v "the quick brown fox"]                            ; wraps at 9 to ["the quick" "brown fox"]
                  (component "caret->rowcol"
                             (assertions
@@ -860,7 +813,7 @@
                                                   (if (= c 9) 9 c))))
                                      (range 0 (inc (count v)))) => true))))
 
-(specification {:covers {`engine/text-scroll-top "8d98bb,9b3c3f"}} "text-scroll-top"
+(specification {:covers {`engine/text-scroll-top "8d98bb,01b510"}} "text-scroll-top"
                (let [v "the quick brown fox jumps"]                      ; wraps at 9 to 3 rows (row 2 = "jumps")
                  (assertions
                   "no scroll when the caret row already fits within the window height"
@@ -883,7 +836,7 @@
                 "is false for a non-node"
                 (engine/multiline-input? "x") => false))
 
-(specification {:covers {`engine/apply-edit-multiline "836f68,575f84"}} "apply-edit-multiline"
+(specification {:covers {`engine/apply-edit-multiline "836f68,1a11ff"}} "apply-edit-multiline"
                (let [v "the quick brown fox"]                            ; wraps at 9 to ["the quick" "brown fox"]
                  (component "Enter inserts a newline (does not submit)"
                             (assertions
@@ -938,15 +891,15 @@
                   "set-input-width! records the width for that input id"
                   (engine/input-width app :notes 999) => 20)))
 
-(specification {:covers {`engine/handle-input-key! "11ab98,caa37d"}} "handle-input-key! (single-line vs multiline)"
+(specification {:covers {`engine/handle-input-key! "11ab98,ac6054"}} "handle-input-key! (single-line vs multiline)"
                (component "single-line input: Enter submits, other keys edit"
                           (let [submitted (atom nil)
                                 changed   (atom nil)
                                 ra        (atom {::engine/carets {:f 1}})
                                 app       {:com.fulcrologic.fulcro.application/runtime-atom ra}
                                 node      (elements/input {:id :f :value "abc"
-                                                      :on-submit (fn [v] (reset! submitted v))
-                                                      :on-change (fn [v c] (reset! changed [v c]))})]
+                                                           :on-submit (fn [v] (reset! submitted v))
+                                                           :on-change (fn [v c] (reset! changed [v c]))})]
                             (engine/handle-input-key! app node {:key :enter})
                             (assertions
                              "Enter invokes :on-submit with the current value (no edit)"
@@ -962,8 +915,8 @@
                                 ra        (atom {::engine/carets {:n 1} ::engine/input-widths {:n 9}})
                                 app       {:com.fulcrologic.fulcro.application/runtime-atom ra}
                                 node      (elements/input {:id :n :multiline? true :value "ab"
-                                                      :on-submit (fn [v] (reset! submitted v))
-                                                      :on-change (fn [v c] (reset! changed [v c]))})]
+                                                           :on-submit (fn [v] (reset! submitted v))
+                                                           :on-change (fn [v c] (reset! changed [v c]))})]
                             (engine/handle-input-key! app node {:key :enter})
                             (assertions
                              "Enter inserts a \\n at the caret and advances it (on-change), not submitting"
@@ -975,7 +928,7 @@
                                 ra      (atom {::engine/carets {:n 2} ::engine/input-widths {:n 9}})
                                 app     {:com.fulcrologic.fulcro.application/runtime-atom ra}
                                 node    (elements/input {:id :n :multiline? true :value "the quick brown fox"
-                                                    :on-change (fn [v c] (reset! changed [v c]))})]
+                                                         :on-change (fn [v c] (reset! changed [v c]))})]
                             (engine/handle-input-key! app node {:key :down})
                             (assertions
                              ":down moves the caret to the same column one visual row down (value unchanged)"
@@ -1055,10 +1008,10 @@
                          `engine/next-focus       "59e3a5,dbaa57"
                          `engine/prev-focus       "b15d77,dbaa57"}} "focus ring"
                (let [tree (elements/vbox {:id "root"}
-                                    (elements/button {:id "a"} "A")
-                                    (elements/hbox {:id "mid"}
-                                              (elements/input {:id "b" :value "" :priority 5})
-                                              (elements/button {:id "c"} "C")))
+                                         (elements/button {:id "a"} "A")
+                                         (elements/hbox {:id "mid"}
+                                                        (elements/input {:id "b" :value "" :priority 5})
+                                                        (elements/button {:id "c"} "C")))
                      focs (engine/focusables tree)]
                  (component "focusables (document/pre-order DFS)"
                             (assertions
@@ -1093,8 +1046,8 @@
 (specification {:covers {`engine/apply-focus-change! "14481f,804804"}} "apply-focus-change!"
                (let [evts (atom [])
                      tree (elements/vbox {:id "root"}
-                                    (elements/button {:id "a" :on-lost-focus (fn [id] (swap! evts conj [:lost id]))} "A")
-                                    (elements/button {:id "b" :on-focus (fn [id] (swap! evts conj [:focus id]))} "B"))]
+                                         (elements/button {:id "a" :on-lost-focus (fn [id] (swap! evts conj [:lost id]))} "A")
+                                         (elements/button {:id "b" :on-focus (fn [id] (swap! evts conj [:focus id]))} "B"))]
                  (component "on a real change"
                             (engine/apply-focus-change! :app tree "a" "b")
                             (assertions
@@ -1123,7 +1076,7 @@
                (component "focused handler fires"
                           (let [fired (atom [])
                                 tree  (elements/vbox {:id "root"}
-                                                (elements/button {:id "btn" :on-key (fn [e] (swap! fired conj (:key e)) :stop)} "B"))
+                                                     (elements/button {:id "btn" :on-key (fn [e] (swap! fired conj (:key e)) :stop)} "B"))
                                 r     (engine/route-key :ctx tree "btn" {:key :enter} nil)]
                             (assertions
                              "the focused node's :on-key receives the event and its truthy result is returned"
@@ -1134,8 +1087,8 @@
                (component "bubbles to an ancestor when the focused handler returns falsey"
                           (let [fired (atom [])
                                 tree  (elements/vbox {:id "root" :on-key (fn [_] (swap! fired conj :root) :handled)}
-                                                (elements/hbox {:id "mid" :on-key (fn [_] (swap! fired conj :mid) nil)}
-                                                          (elements/button {:id "btn" :on-key (fn [_] (swap! fired conj :btn) nil)} "B")))
+                                                     (elements/hbox {:id "mid" :on-key (fn [_] (swap! fired conj :mid) nil)}
+                                                                    (elements/button {:id "btn" :on-key (fn [_] (swap! fired conj :btn) nil)} "B")))
                                 r     (engine/route-key :ctx tree "btn" {:key :enter} nil)]
                             (assertions
                              "stops at the first ancestor returning truthy, returning that result"
@@ -1147,7 +1100,7 @@
                           (let [global (atom nil)
                                 tree   (elements/vbox {:id "root"} (elements/button {:id "btn"} "B"))
                                 r      (engine/route-key :ctx tree "btn" {:key "q" :char "q" :ctrl? true}
-                                                      {[:ctrl "q"] (fn [ctx e] (reset! global [ctx (:key e)]) :quit)})]
+                                                         {[:ctrl "q"] (fn [ctx e] (reset! global [ctx (:key e)]) :quit)})]
                             (assertions
                              "invokes the global handler for the event's chord with context and event"
                              @global => [:ctx "q"]
@@ -1170,13 +1123,13 @@
    :ident         (fn [] [:component/id ::driver])
    :initial-state {:driver/name "AB" :driver/hidden? false :driver/quit? false}}
   (elements/vbox {:id "root"}
-            (elements/input {:id        "name"
-                        :value     name
-                        :on-change (fn [v _caret] (elements/transact! this [(set-driver-name {:v v})]))})
-            (when-not hidden?
-              (elements/button {:id          "ok"
-                           :on-focus    (fn [_] (elements/transact! this [(set-driver-name {:v "FOCUSED"})]))
-                           :on-activate (fn [] (elements/transact! this [(set-driver-name {:v "ACTIVATED"})]))} "OK"))))
+                 (elements/input {:id        "name"
+                                  :value     name
+                                  :on-change (fn [v _caret] (elements/transact! this [(set-driver-name {:v v})]))})
+                 (when-not hidden?
+                   (elements/button {:id          "ok"
+                                     :on-focus    (fn [_] (elements/transact! this [(set-driver-name {:v "FOCUSED"})]))
+                                     :on-activate (fn [] (elements/transact! this [(set-driver-name {:v "ACTIVATED"})]))} "OK"))))
 
 (defn- build-driver-app
   "Builds a synchronous raw TUI app rooted at DriverRoot, with no-op renderers so
@@ -1197,14 +1150,14 @@
    :ident         (fn [] [:component/id ::ml])
    :initial-state {:driver/name "AB" :driver/notes "NOTES"}}
   (elements/vbox {:id "root"}
-            (elements/input {:id        "name"
-                        :value     name
-                        :on-change (fn [v _caret] (elements/transact! this [(set-driver-name {:v v})]))})
-            (elements/input {:id         "notes"
-                        :multiline? true
-                        :value      notes
-                        :on-change  (fn [v _caret] (elements/transact! this [(set-driver-name {:v v})]))})
-            (elements/button {:id "ok"} "OK")))
+                 (elements/input {:id        "name"
+                                  :value     name
+                                  :on-change (fn [v _caret] (elements/transact! this [(set-driver-name {:v v})]))})
+                 (elements/input {:id         "notes"
+                                  :multiline? true
+                                  :value      notes
+                                  :on-change  (fn [v _caret] (elements/transact! this [(set-driver-name {:v v})]))})
+                 (elements/button {:id "ok"} "OK")))
 
 (defn- build-multiline-app
   "Builds a synchronous raw TUI app rooted at MultilineRoot."
@@ -1217,9 +1170,8 @@
     (rapp/initialize-state! app MultilineRoot)
     app))
 
-(specification {:covers {`elements/focused?      "17e934,8a7d8e"
-                         `engine/current-focus "8b7584"
-                         `engine/focus!        "f79a95"}} "focused? / current-focus / focus!"
+(specification {:covers {`engine/current-focus "8b7584"
+                         `engine/focus!        "f79a95"}} "current-focus / focus!"
                (let [app (build-driver-app)]
                  (engine/focus! app "name")
                  (assertions
@@ -1228,13 +1180,9 @@
                   "current-focus reads the focused id back from the app"
                   (engine/current-focus app) => "name"
                   "current-focus also reads from a bare state-map"
-                  (engine/current-focus {::engine/focus "name"}) => "name"
-                  "focused? is true for the bound *current-focus*"
-                  (binding [engine/*current-focus* "name"] (elements/focused? "name")) => true
-                  "focused? is false for a different id"
-                  (binding [engine/*current-focus* "name"] (elements/focused? "other")) => false)))
+                  (engine/current-focus {::engine/focus "name"}) => "name")))
 
-(specification {:covers {`engine/process-key! "a34332,714f22"}} "process-key!"
+(specification {:covers {`engine/process-key! "a34332,a99726"}} "process-key!"
                (component "Enter or Space activates a focused button"
                           (let [app (build-driver-app)
                                 sa  (:com.fulcrologic.fulcro.application/state-atom app)]
@@ -1287,8 +1235,8 @@
       ;; focus "ok", then a global-keymap handler hides it; focus should move to "name"
                             (engine/focus! app "ok")
                             (engine/process-key! app {:key "h" :char "h"}
-                                              {"h" (fn [a _e] (swap! (:com.fulcrologic.fulcro.application/state-atom a)
-                                                                     assoc :driver/hidden? true))})
+                                                 {"h" (fn [a _e] (swap! (:com.fulcrologic.fulcro.application/state-atom a)
+                                                                        assoc :driver/hidden? true))})
                             (assertions
                              "after the focused node is removed, focus moves to a remaining focusable"
                              (engine/current-focus app) => "name")))
@@ -1301,7 +1249,7 @@
       ;; the focused input's own keys; route-key is used when focus is not an input.
                             (engine/focus! app "ok")                     ; focus the button (not an input)
                             (engine/process-key! app {:key "q" :char "q" :ctrl? true}
-                                              {[:ctrl "q"] (fn [_a _e] (reset! quit :quit))})
+                                                 {[:ctrl "q"] (fn [_a _e] (reset! quit :quit))})
                             (assertions
                              "the global keymap handler ran for the ctrl-q chord"
                              @quit => :quit)))
@@ -1358,10 +1306,10 @@
                 (engine/modal-node? nil) => false))
 
 (let [tree (elements/vbox {:id "root"}
-                     (elements/button {:id :base} "Base")
-                     (elements/modal {:id :open-1 :open? true} (elements/button {:id :o1} "O1"))
-                     (elements/modal {:id :closed :open? false} (elements/button {:id :c} "C"))
-                     (elements/modal {:id :open-2 :open? true} (elements/button {:id :o2} "O2")))]
+                          (elements/button {:id :base} "Base")
+                          (elements/modal {:id :open-1 :open? true} (elements/button {:id :o1} "O1"))
+                          (elements/modal {:id :closed :open? false} (elements/button {:id :c} "C"))
+                          (elements/modal {:id :open-2 :open? true} (elements/button {:id :o2} "O2")))]
 
   (specification {:covers {`engine/collect-overlays "a78c8f,2a7273"}} "collect-overlays"
                  (assertions
@@ -1389,9 +1337,9 @@
                   "with no open modal, returns the base tree with closed modals stripped"
                   (mapv :id (engine/focusables
                              (engine/active-tree (elements/vbox {:id "r"}
-                                                        (elements/button {:id :base} "B")
-                                                        (elements/modal {:id :c :open? false}
-                                                                   (elements/button {:id :hidden} "H"))))))
+                                                                (elements/button {:id :base} "B")
+                                                                (elements/modal {:id :c :open? false}
+                                                                                (elements/button {:id :hidden} "H"))))))
                   => [:base])))
 
 (specification {:covers {`engine/overlay-window-rect "1c450f,2e15d4"}} "overlay-window-rect"
@@ -1401,7 +1349,7 @@
                 => {:x 5 :y 2 :w 10 :h 4}
                 "resolves a fractional width/height against the screen"
                 (engine/overlay-window-rect (elements/modal {:id :d :width [:fraction 0.5] :height [:fraction 0.5]})
-                                         {:x 0 :y 0 :w 40 :h 20})
+                                            {:x 0 :y 0 :w 40 :h 20})
                 => {:x 10 :y 5 :w 20 :h 10}
                 "clamps the window to the screen size"
                 (engine/overlay-window-rect (elements/modal {:id :d :width 100 :height 100}) {:x 0 :y 0 :w 20 :h 8})
@@ -1410,8 +1358,8 @@
                 (engine/overlay-window-rect (elements/modal {:id :d :width 10 :height 4 :align :start}) {:x 0 :y 0 :w 20 :h 8})
                 => {:x 0 :y 0 :w 10 :h 4}))
 
-(specification {:covers {`engine/paint "9cb0a6,ac1e59"
-                         `engine/place "b3e3fa,e5243f"}} "modal layout & paint"
+(specification {:covers {`engine/paint "9cb0a6,dc3f9b"
+                         `engine/place "b3e3fa,590943"}} "modal layout & paint"
                (let [m       (elements/modal {:id :d :title "Menu" :width 10 :height 4} (elements/text {} "hi"))
                      placed  (engine/place m {:x 2 :y 1 :w 10 :h 4})
         ;; paint a full-screen base first, then the modal on top, to prove opacity.
@@ -1432,30 +1380,5 @@
                   "leaves base content outside the window visible"
                   (subs (nth scr 0) 0 14) => "XXXXXXXXXXXXXX")))
 
-(specification {:covers {`elements/picker "dd855e,57d045"}} "picker"
-               (let [selected (atom nil)
-                     cancelled (atom false)
-                     p (elements/picker {:id :fruit :open? true :title "Fruit" :width 16 :height 6
-                                    :options [{:value :apple :label "Apple"}
-                                              {:value :pear :label "Pear"}]
-                                    :on-select (fn [v] (reset! selected v))
-                                    :on-cancel (fn [] (reset! cancelled true))})
-                     viewport (first (::engine/children p))
-                     list-box (first (::engine/children viewport))
-                     rows     (::engine/children list-box)]
-                 (assertions
-                  "is a modal carrying the picker's id, title, and size"
-                  (::engine/tag p) => :modal
-                  (engine/node-attr p :id) => :fruit
-                  (engine/node-attr p :title) => "Fruit"
-                  "wraps its rows in a scrollable viewport keyed off the picker id"
-                  (::engine/tag viewport) => :viewport
-                  (engine/node-attr viewport :id) => :fruit-list
-                  "renders one focusable button row per option, in order"
-                  (mapv ::engine/tag rows) => [:button :button]
-                  (mapv #(engine/node-attr % :id) rows) => [:fruit-apple :fruit-pear]
-                  (mapv #(apply str (::engine/children %)) rows) => ["Apple" "Pear"]
-                  "wires the modal's :on-dismiss to the picker's :on-cancel"
-                  (do ((engine/node-attr p :on-dismiss)) @cancelled) => true
-                  "activating a row selects that option's value via :on-select"
-                  (do (engine/activate! (first rows)) @selected) => :apple)))
+;; NOTE: element-generator specs (`elements/element`, `elements/focused?`, `elements/picker`)
+;; live in `com.fulcrologic.fulcro.tui.elements-spec`.
