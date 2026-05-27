@@ -7,11 +7,12 @@
 
    This is JVM/babashka only (plain `.clj`)."
   (:require
-   [com.fulcrologic.guardrails.core :refer [>def >defn >defn- => ?]]
-   [clojure.spec.alpha :as s])
+    [clojure.spec.alpha :as s]
+    [com.fulcrologic.guardrails.core :refer [=> >def >defn >defn- ?]])
   (:import
-   (org.jline.terminal TerminalBuilder)
-   (org.jline.utils NonBlockingReader)))
+    (org.jline.terminal Terminal TerminalBuilder)
+    (org.jline.utils NonBlockingReader)
+    (sun.misc Signal SignalHandler)))
 
 ;; =============================================================================
 ;; Normalized key-event model
@@ -29,11 +30,11 @@
    this counts code points rather than `count` (which counts UTF-16 code units)."
   [s]
   (and (string? s)
-       (pos? (count s))
-       (= 1 (.codePointCount ^String s 0 (count s)))))
+    (pos? (count s))
+    (= 1 (.codePointCount ^String s 0 (count s)))))
 
 (>def ::key (s/or :special special-keys
-                  :printable single-codepoint-string?))
+              :printable single-codepoint-string?))
 (>def ::char (s/nilable string?))
 (>def ::ctrl? boolean?)
 (>def ::alt? boolean?)
@@ -41,110 +42,110 @@
 (>def ::raw (s/or :code-point int? :code-points (s/coll-of int? :kind vector?)))
 
 (>def ::key-event
-      (s/keys :req-un [::key ::ctrl? ::alt? ::shift?]
-              :opt-un [::char ::raw]))
+  (s/keys :req-un [::key ::ctrl? ::alt? ::shift?]
+    :opt-un [::char ::raw]))
 
 (>defn key-event
-       "Returns a normalized key event map. `key` is a 1-char string (printable) or a keyword from
-   `special-keys`. The remaining values default to a non-modified, non-char event; pass `opts`
-   (a map of any of `:char :ctrl? :alt? :shift? :raw`) to override."
-       ([key]
-        [::key => ::key-event]
-        (key-event key {}))
-       ([key opts]
-        [::key map? => ::key-event]
-        (merge {:key   key
-                :char  nil
-                :ctrl? false
-                :alt?  false
-                :shift? false}
-               opts)))
+  "Returns a normalized key event map. `key` is a 1-char string (printable) or a keyword from
+`special-keys`. The remaining values default to a non-modified, non-char event; pass `opts`
+(a map of any of `:char :ctrl? :alt? :shift? :raw`) to override."
+  ([key]
+   [::key => ::key-event]
+   (key-event key {}))
+  ([key opts]
+   [::key map? => ::key-event]
+   (merge {:key    key
+           :char   nil
+           :ctrl?  false
+           :alt?   false
+           :shift? false}
+     opts)))
 
 ;; =============================================================================
 ;; Pure key decoder (testable WITHOUT JLine)
 ;; =============================================================================
 
 (>defn- ctrl-letter
-        "Returns the lowercase letter string for a control code `n` in 1..26 (1 -> \"a\" .. 26 -> \"z\")."
-        [n]
-        [int? => string?]
-        (str (char (+ (int \a) (dec n)))))
+  "Returns the lowercase letter string for a control code `n` in 1..26 (1 -> \"a\" .. 26 -> \"z\")."
+  [n]
+  [int? => string?]
+  (str (char (+ (int \a) (dec n)))))
 
 (>defn- printable-event
-        "Returns a printable `::key-event` for the unicode code point `cp` (the `:key` and `:char` are the
-   1-char string for `cp`)."
-        [cp]
-        [int? => ::key-event]
-        (let [s (String. (Character/toChars cp))]
-          (key-event s {:char s :raw cp})))
+  "Returns a printable `::key-event` for the unicode code point `cp` (the `:key` and `:char` are the
+1-char string for `cp`)."
+  [cp]
+  [int? => ::key-event]
+  (let [s (String. (Character/toChars cp))]
+    (key-event s {:char s :raw cp})))
 
 (>defn- csi-event
-        "Returns `[event remaining]` for a CSI (ESC `[`) sequence, given `rest-ints` (the ints AFTER the
-   leading `27 91`). Returns nil if the sequence is not recognized so the caller can fall back."
-        [rest-ints]
-        [(s/coll-of int?) => (? (s/tuple ::key-event (s/coll-of int?)))]
-        (let [v   (vec rest-ints)
-              f   (first v)
-              raw-2 (fn [k]            ; two-byte CSI like 27 91 65 ("A")
-                      [(key-event k {:raw [27 91 f]}) (subvec v 1)])
-              raw-3 (fn [k]            ; three-byte CSI like 27 91 51 126 ("3~")
-                      [(key-event k {:raw [27 91 f 126]}) (subvec v 2)])]
-          (cond
-            (= f 65) (raw-2 :up)
-            (= f 66) (raw-2 :down)
-            (= f 67) (raw-2 :right)
-            (= f 68) (raw-2 :left)
-            (= f 72) (raw-2 :home)
-            (= f 70) (raw-2 :end)
-            (= f 90) (raw-2 :backtab)                              ; ESC [ Z = Shift-Tab
+  "Returns `[event remaining]` for a CSI (ESC `[`) sequence, given `rest-ints` (the ints AFTER the
+leading `27 91`). Returns nil if the sequence is not recognized so the caller can fall back."
+  [rest-ints]
+  [(s/coll-of int?) => (? (s/tuple ::key-event (s/coll-of int?)))]
+  (let [v     (vec rest-ints)
+        f     (first v)
+        raw-2 (fn [k]                                       ; two-byte CSI like 27 91 65 ("A")
+                [(key-event k {:raw [27 91 f]}) (subvec v 1)])
+        raw-3 (fn [k]                                       ; three-byte CSI like 27 91 51 126 ("3~")
+                [(key-event k {:raw [27 91 f 126]}) (subvec v 2)])]
+    (cond
+      (= f 65) (raw-2 :up)
+      (= f 66) (raw-2 :down)
+      (= f 67) (raw-2 :right)
+      (= f 68) (raw-2 :left)
+      (= f 72) (raw-2 :home)
+      (= f 70) (raw-2 :end)
+      (= f 90) (raw-2 :backtab)                             ; ESC [ Z = Shift-Tab
       ;; numeric forms terminated by ~ (126)
-            (and (= (second v) 126))
-            (case (int f)
-              51 (raw-3 :delete)                                  ; 3~
-              49 (raw-3 :home)                                    ; 1~
-              52 (raw-3 :end)                                     ; 4~
-              53 (raw-3 :page-up)                                 ; 5~
-              54 (raw-3 :page-down)                               ; 6~
-              nil)
-            :else nil)))
+      (and (= (second v) 126))
+      (case (int f)
+        51 (raw-3 :delete)                                  ; 3~
+        49 (raw-3 :home)                                    ; 1~
+        52 (raw-3 :end)                                     ; 4~
+        53 (raw-3 :page-up)                                 ; 5~
+        54 (raw-3 :page-down)                               ; 6~
+        nil)
+      :else nil)))
 
 (>defn decode-key
-       "Decodes the next key from a sequence of input code points `ints`.
+  "Decodes the next key from a sequence of input code points `ints`.
 
-   Returns `[event remaining-ints]`, consuming exactly the code points for one key, or `nil` when
-   `ints` is empty. The decoder is pure and contains no JLine/IO dependency. Handles:
+Returns `[event remaining-ints]`, consuming exactly the code points for one key, or `nil` when
+`ints` is empty. The decoder is pure and contains no JLine/IO dependency. Handles:
 
-   * printable ASCII / multi-byte unicode code points -> printable event
-   * 9 -> `:tab`; 10 or 13 -> `:enter`; 8 or 127 -> `:backspace`
-   * 27 alone (nothing following) -> `:escape`
-   * CSI cursor/edit sequences (`27 91 ...`) -> arrows, home/end, delete, page-up/down
-   * control combos 1..26 -> `{:ctrl? true :key \"a\"..\"z\"}` (tab/enter handled first)"
-       [ints]
-       [(s/coll-of int?) => (? (s/tuple ::key-event (s/coll-of int?)))]
-       (let [v (vec ints)]
-         (when (seq v)
-           (let [c    (int (first v))
-                 rest (subvec v 1)]
-             (cond
-               (= c 9) [(key-event :tab {:raw c}) rest]
-               (or (= c 10) (= c 13)) [(key-event :enter {:raw c}) rest]
-               (or (= c 8) (= c 127)) [(key-event :backspace {:raw c}) rest]
-               (= c 27)
-               (cond
-                 (empty? rest) [(key-event :escape {:raw c}) rest]
-                 (= (int (first rest)) 91)
-                 (or (csi-event (subvec v 2))
+* printable ASCII / multi-byte unicode code points -> printable event
+* 9 -> `:tab`; 10 or 13 -> `:enter`; 8 or 127 -> `:backspace`
+* 27 alone (nothing following) -> `:escape`
+* CSI cursor/edit sequences (`27 91 ...`) -> arrows, home/end, delete, page-up/down
+* control combos 1..26 -> `{:ctrl? true :key \"a\"..\"z\"}` (tab/enter handled first)"
+  [ints]
+  [(s/coll-of int?) => (? (s/tuple ::key-event (s/coll-of int?)))]
+  (let [v (vec ints)]
+    (when (seq v)
+      (let [c    (int (first v))
+            rest (subvec v 1)]
+        (cond
+          (= c 9) [(key-event :tab {:raw c}) rest]
+          (or (= c 10) (= c 13)) [(key-event :enter {:raw c}) rest]
+          (or (= c 8) (= c 127)) [(key-event :backspace {:raw c}) rest]
+          (= c 27)
+          (cond
+            (empty? rest) [(key-event :escape {:raw c}) rest]
+            (= (int (first rest)) 91)
+            (or (csi-event (subvec v 2))
               ;; unrecognized CSI: treat ESC as escape, leave the rest
-                     [(key-event :escape {:raw c}) rest])
+              [(key-event :escape {:raw c}) rest])
             ;; ESC + something else: treat ESC as escape (alt-combos not modeled here)
-                 :else [(key-event :escape {:raw c}) rest])
+            :else [(key-event :escape {:raw c}) rest])
           ;; control combos 1..26 (9/13 already handled above)
-               (and (>= c 1) (<= c 26))
-               [(key-event (ctrl-letter c) {:ctrl? true :raw c}) rest]
+          (and (>= c 1) (<= c 26))
+          [(key-event (ctrl-letter c) {:ctrl? true :raw c}) rest]
           ;; printable / multi-byte unicode
-               (>= c 32) [(printable-event c) rest]
+          (>= c 32) [(printable-event c) rest]
           ;; anything else (e.g. 0): consume as printable code point best-effort
-               :else [(printable-event c) rest])))))
+          :else [(printable-event c) rest])))))
 
 ;; =============================================================================
 ;; Terminal protocol
@@ -171,11 +172,11 @@
 (def ^:private ansi-cursor-show "[?25h")
 
 (>defn cursor-position-string
-       "Returns the ANSI escape sequence that moves the cursor to 0-based (`x`,`y`). ANSI is 1-based, so
-   both are incremented."
-       [x y]
-       [int? int? => string?]
-       (str "[" (inc y) ";" (inc x) "H"))
+  "Returns the ANSI escape sequence that moves the cursor to 0-based (`x`,`y`). ANSI is 1-based, so
+both are incremented."
+  [x y]
+  [int? int? => string?]
+  (str "[" (inc y) ";" (inc x) "H"))
 
 ;; =============================================================================
 ;; JLine implementation
@@ -196,7 +197,7 @@
         (loop []
           (let [n (.read reader 5)]                         ; 5ms peek window
             (when (and (not= n NonBlockingReader/READ_EXPIRED)
-                       (not= n NonBlockingReader/EOF))
+                    (not= n NonBlockingReader/EOF))
               (conj! acc (int n))
               (recur))))
         (let [ints (persistent! acc)
@@ -206,7 +207,7 @@
       (let [[ev _] (decode-key [c])]
         ev))))
 
-(deftype JLineTerminal [^org.jline.terminal.Terminal term resize-handler closed?]
+(deftype JLineTerminal [^Terminal term resize-handler closed?]
   Terminal
   (t-size [_]
     {:rows (.getHeight term) :cols (.getWidth term)})
@@ -248,11 +249,11 @@
     ;; the handler must be safe to call concurrently with the input loop. Wrapped in try/catch:
     ;; WINCH is absent on some platforms (e.g. Windows), where resize signals are simply ignored.
     (try
-      (sun.misc.Signal/handle
-       (sun.misc.Signal. "WINCH")
-       (reify sun.misc.SignalHandler
-         (handle [_ _sig]
-           (when-let [h @resize-handler] (h)))))
+      (Signal/handle
+        (Signal. "WINCH")
+        (reify SignalHandler
+          (handle [_ _sig]
+            (when-let [h @resize-handler] (h)))))
       (catch Throwable _ nil))
     nil))
 
@@ -303,7 +304,7 @@
 
    Use the accessors `output`, `cursor`, `feed!`, and `resize!` to drive/inspect it."
   [{:keys [rows cols keys sync?] :or {rows 24 cols 80 keys []}}]
-  (->StringTerminal (atom {:rows rows :cols cols :keys (vec keys)
+  (->StringTerminal (atom {:rows   rows :cols cols :keys (vec keys)
                            :output "" :cursor nil :sync? (boolean sync?)})))
 
 (defn output

@@ -22,12 +22,11 @@
    submit), the arrow keys move the caret (Up/Down by visual line), and it self-scrolls to keep the
    caret visible. A read-only wrapped paragraph above the form demonstrates line wrapping."
   (:require
-   [clojure.string :as str]
-   [com.fulcrologic.fulcro.components :as comp]
-   [com.fulcrologic.fulcro.mutations :as m]
-   [com.fulcrologic.fulcro.tui.engine :as engine]
-   [com.fulcrologic.fulcro.tui.elements :as elements]
-   [com.fulcrologic.fulcro.tui.application :as app]))
+    [clojure.string :as str]
+    [com.fulcrologic.fulcro.components :as comp]
+    [com.fulcrologic.fulcro.mutations :as m]
+    [com.fulcrologic.fulcro.tui.application :as app]
+    [com.fulcrologic.fulcro.tui.elements :as elements :refer [box button focused? hbox input line picker text vbox viewport]]))
 
 (m/defmutation set-field
   "Stores value `v` under top-level key `k` in app state (the form fields live at the root)."
@@ -47,16 +46,16 @@
 
 (def initial-db
   "The initial root-level app state for the demo (the form fields live at the db root)."
-  {:form/name        "" :form/email "" :form/notes "" :form/saved? false :form/selected nil
-   :form/fruit       nil
+  {:form/name          "" :form/email "" :form/notes "" :form/saved? false :form/selected nil
+   :form/fruit         nil
    :form/picker-open?  false
    :form/confirm-open? false})
 
 (def fruit-options
   "Options for the demo fruit picker — a list long enough to require scrolling."
   (mapv (fn [f] {:value (keyword f) :label (str/capitalize f)})
-        ["apple" "banana" "cherry" "date" "elderberry" "fig" "grape"
-         "honeydew" "kiwi" "lemon" "mango" "nectarine" "orange" "pear"]))
+    ["apple" "banana" "cherry" "date" "elderberry" "fig" "grape"
+     "honeydew" "kiwi" "lemon" "mango" "nectarine" "orange" "pear"]))
 
 (def lorem
   "A read-only sentence used to demonstrate word wrapping in a fixed-width box."
@@ -72,122 +71,122 @@
                    :form/fruit :form/picker-open? :form/confirm-open?]
    :initial-state (fn [_] initial-db)}
   (let [field (fn [label id value k]
-                (elements/hbox {:height 1}
-                          (elements/text {:width 8 :color :cyan} label)
-                          (elements/input {:id        id
-                                      :grow      1
-                                      :color     :bright-white
-                                      :value     (or value "")
-                                      :on-change (fn [v _caret]
-                                           ;; editing a field clears the prior "Saved!" status
-                                                   (elements/transact! this [(set-field {:k k :v v})
-                                                                        (set-field {:k :form/saved? :v false})]))})))]
-    (elements/vbox {:padding 1 :border? true :color :cyan}
-              (elements/text {:bold true :color :bright-cyan} "Fulcro TUI demo")
-              (elements/text {:color :bright-black} "Tab/Shift-Tab move focus · type to edit · Enter/Space activates · Ctrl-Q quits")
-              (elements/text {:color :bright-black} "PageUp/PageDown scroll the item list below")
-              (elements/line {})
+                (hbox {:height 1}
+                  (text {:width 8 :color :cyan} label)
+                  (input {:id        id
+                          :grow      1
+                          :color     :bright-white
+                          :value     (or value "")
+                          :on-change (fn [v _caret]
+                                       ;; editing a field clears the prior "Saved!" status
+                                       (comp/transact! this [(set-field {:k k :v v})
+                                                             (set-field {:k :form/saved? :v false})]))})))]
+    (vbox {:padding 1 :border? true :color :cyan}
+      (text {:bold true :color :bright-cyan} "Fulcro TUI demo")
+      (text {:color :bright-black} "Tab/Shift-Tab move focus · type to edit · Enter/Space activates · Ctrl-Q quits")
+      (text {:color :bright-black} "PageUp/PageDown scroll the item list below")
+      (line {})
       ;; A read-only paragraph that wraps to its fixed-width bordered box (40 wide => 38 content
       ;; columns; the box is tall enough to show all 5 wrapped lines).
-              (elements/text {:color :yellow} "About (read-only, wrapped):")
-              (elements/box {:width 40 :height 5 :border? true :color :bright-black}
-                       (elements/text {:wrap true} lorem))
-              (elements/line {})
-              (field "Name:"  :name  name  :form/name)
-              (field "Email:" :email email :form/email)
-              (elements/line {})
+      (text {:color :yellow} "About (read-only, wrapped):")
+      (box {:width 40 :height 5 :border? true :color :bright-black}
+        (text {:wrap true} lorem))
+      (line {})
+      (field "Name:" :name name :form/name)
+      (field "Email:" :email email :form/email)
+      (line {})
       ;; An editable multiline text-area wired to :form/notes. It grows to the available width,
       ;; is 4 rows tall, wraps its value, and self-scrolls to keep the caret visible.
-              (elements/text {:color :cyan} "Notes (multiline · Enter=newline · arrows move caret):")
+      (text {:color :cyan} "Notes (multiline · Enter=newline · arrows move caret):")
       ;; Fixed height (4 rows) and fills the available width on the cross-axis. NOT :grow —
       ;; a fixed-size text box should not fight for leftover vertical space.
-              (elements/input {:id         :notes
-                          :multiline? true
-                          :height     4
-                          :color      :bright-white
-                          :value      (or notes "")
-                          :on-change  (fn [v _caret]
-                                        (elements/transact! this [(set-field {:k :form/notes :v v})
-                                                             (set-field {:k :form/saved? :v false})]))})
-              (elements/line {})
-              (elements/hbox {:height 1}
-                        (elements/button {:id          :save
-                                     :color       (if saved? :bright-green :green)
-                                     :bold        true
-                                     :highlight   (elements/focused? :save)
-                                     :on-activate (fn [] (elements/transact! this [(set-field {:k :form/saved? :v true})]))}
-                                    (if saved? " Saved! " " Save "))
-                        (elements/text {:width 2} "")
-                ;; Opens a plain modal confirmation dialog (see the :confirm modal below).
-                        (elements/button {:id          :reset
-                                     :color       :bright-yellow
-                                     :bold        true
-                                     :highlight   (elements/focused? :reset)
-                                     :on-activate (fn [] (elements/transact! this [(set-field {:k :form/confirm-open? :v true})]))}
-                                    " Reset… "))
-              (elements/text {:color (if saved? :bright-green :bright-black)}
-                        (str "name=" (pr-str name) "  email=" (pr-str email) "  saved?=" (boolean saved?)))
-              (elements/line {})
-              (elements/text {:color :yellow} (str "Items (Tab in, then arrows/PageUp/PageDown to scroll) — "
-                                              "selected: " (if selected (str "Item " selected) "none")))
+      (input {:id         :notes
+              :multiline? true
+              :height     4
+              :color      :bright-white
+              :value      (or notes "")
+              :on-change  (fn [v _caret]
+                            (comp/transact! this [(set-field {:k :form/notes :v v})
+                                                  (set-field {:k :form/saved? :v false})]))})
+      (line {})
+      (hbox {:height 1}
+        (button {:id          :save
+                 :color       (if saved? :bright-green :green)
+                 :bold        true
+                 :highlight   (focused? :save)
+                 :on-activate (fn [] (comp/transact! this [(set-field {:k :form/saved? :v true})]))}
+          (if saved? " Saved! " " Save "))
+        (text {:width 2} "")
+        ;; Opens a plain modal confirmation dialog (see the :confirm modal below).
+        (button {:id          :reset
+                 :color       :bright-yellow
+                 :bold        true
+                 :highlight   (focused? :reset)
+                 :on-activate (fn [] (comp/transact! this [(set-field {:k :form/confirm-open? :v true})]))}
+          " Reset… "))
+      (text {:color (if saved? :bright-green :bright-black)}
+        (str "name=" (pr-str name) "  email=" (pr-str email) "  saved?=" (boolean saved?)))
+      (line {})
+      (text {:color :yellow} (str "Items (Tab in, then arrows/PageUp/PageDown to scroll) — "
+                               "selected: " (if selected (str "Item " selected) "none")))
       ;; A fixed-height viewport of 15 focusable items; tabbing into it auto-scrolls.
-              (elements/viewport {:id :items :height 6 :border? true :color :bright-black}
-                            (elements/vbox {}
-                                      (for [i (range item-count)]
-                                        (elements/button {:id          (keyword (str "item-" i))
-                                                     :color       (if (= selected i) :bright-green :cyan)
-                                                     :highlight   (elements/focused? (keyword (str "item-" i)))
-                                                     :on-activate (fn [] (elements/transact! this [(set-field {:k :form/selected :v i})]))}
-                                                    (str (if (= selected i) "● " "  ") "Item " i)))))
-              (elements/line {})
+      (viewport {:id :items :height 6 :border? true :color :bright-black}
+        (vbox {}
+          (for [i (range item-count)]
+            (button {:id          (keyword (str "item-" i))
+                     :color       (if (= selected i) :bright-green :cyan)
+                     :highlight   (focused? (keyword (str "item-" i)))
+                     :on-activate (fn [] (comp/transact! this [(set-field {:k :form/selected :v i})]))}
+              (str (if (= selected i) "● " "  ") "Item " i)))))
+      (line {})
       ;; A button that opens a modal list picker. The picker overlays the whole UI, traps focus
       ;; (Up/Down to highlight, Enter to choose, Escape to cancel), and scrolls if the list is long.
-              (elements/button {:id          :pick-fruit
-                           :color       :bright-magenta
-                           :bold        true
-                           :highlight   (elements/focused? :pick-fruit)
-                           :on-activate (fn [] (elements/transact! this [(set-field {:k :form/picker-open? :v true})]))}
-                          (str " Pick a fruit (" (if fruit (str/capitalize (clojure.core/name fruit)) "none") ") "))
+      (button {:id          :pick-fruit
+               :color       :bright-magenta
+               :bold        true
+               :highlight   (focused? :pick-fruit)
+               :on-activate (fn [] (comp/transact! this [(set-field {:k :form/picker-open? :v true})]))}
+        (str " Pick a fruit (" (if fruit (str/capitalize (clojure.core/name fruit)) "none") ") "))
       ;; The picker lives in the render tree always; it is shown only while :open? is truthy. Its
       ;; presence/selection are ordinary app state driven by the mutations above (the library owns none).
-              (elements/picker {:id        :fruit
-                           :open?     picker-open?
-                           :title     "Pick a fruit"
-                           :width     24
-                           :height    8
-                           :options   fruit-options
-                           :on-select (fn [v] (elements/transact! this [(set-field {:k :form/fruit :v v})
-                                                                   (set-field {:k :form/picker-open? :v false})]))
-                           :on-cancel (fn [] (elements/transact! this [(set-field {:k :form/picker-open? :v false})]))})
+      (picker {:id        :fruit
+               :open?     picker-open?
+               :title     "Pick a fruit"
+               :width     24
+               :height    8
+               :options   fruit-options
+               :on-select (fn [v] (comp/transact! this [(set-field {:k :form/fruit :v v})
+                                                        (set-field {:k :form/picker-open? :v false})]))
+               :on-cancel (fn [] (comp/transact! this [(set-field {:k :form/picker-open? :v false})]))})
       ;; A plain `elements/modal` used directly (not via `picker`): a confirmation dialog with its own
       ;; focus-trapped buttons. While open, Tab/Shift-Tab cycle only between Reset and Cancel, Enter
       ;; activates the focused one, and Escape (or Cancel) dismisses it.
-              (let [close! (fn [] (elements/transact! this [(set-field {:k :form/confirm-open? :v false})]))]
-                (elements/modal {:id         :confirm
-                            :open?      confirm-open?
-                            :title      "Confirm reset"
-                            :width      40
-                            :height     7
-                            :color      :red
-                            :on-dismiss close!}
-                           (elements/text {:wrap true :color :bright-red}
-                                     "Reset every field to its initial value? This cannot be undone.")
-                           (elements/line {})
-                           (elements/hbox {:height 1 :align :center}
-                                     (elements/button {:id          :confirm-reset
-                                                  :color       :bright-red
-                                                  :bold        true
-                                                  :highlight   (elements/focused? :confirm-reset)
-                                                  :on-activate (fn [] (elements/transact! this [(reset-form {})])
-                                                                 (close!))}
-                                                 " Reset ")
-                                     (elements/text {:width 2} "")
-                                     (elements/button {:id          :confirm-cancel
-                                                  :color       :bright-green
-                                                  :bold        true
-                                                  :highlight   (elements/focused? :confirm-cancel)
-                                                  :on-activate close!}
-                                                 " Cancel ")))))))
+      (let [close! (fn [] (comp/transact! this [(set-field {:k :form/confirm-open? :v false})]))]
+        (elements/modal {:id         :confirm
+                         :open?      confirm-open?
+                         :title      "Confirm reset"
+                         :width      40
+                         :height     7
+                         :color      :red
+                         :on-dismiss close!}
+          (text {:wrap true :color :bright-red}
+            "Reset every field to its initial value? This cannot be undone.")
+          (line {})
+          (hbox {:height 1 :align :center}
+            (button {:id          :confirm-reset
+                     :color       :bright-red
+                     :bold        true
+                     :highlight   (focused? :confirm-reset)
+                     :on-activate (fn [] (comp/transact! this [(reset-form {})])
+                                    (close!))}
+              " Reset ")
+            (text {:width 2} "")
+            (button {:id          :confirm-cancel
+                     :color       :bright-green
+                     :bold        true
+                     :highlight   (focused? :confirm-cancel)
+                     :on-activate close!}
+              " Cancel ")))))))
 
 (defn -main
   "Builds the demo app and runs it on the system terminal until Ctrl-Q."

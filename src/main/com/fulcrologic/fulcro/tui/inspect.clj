@@ -24,17 +24,18 @@
    (Without that property `fulcro.inspect.tool/add-fulcro-inspect!` is a no-op, because its body is
    wrapped in the `ilet` macro that only emits in CLJ when that property is \"true\".)"
   (:require
-   [clojure.core.async :as async]
-   [com.fulcrologic.devtools.common.built-in-mutations :as bi]
-   [com.fulcrologic.devtools.common.connection :as cc]
-   [com.fulcrologic.devtools.common.message-keys :as mk]
-   [com.fulcrologic.devtools.common.protocols :as dp]
-   [com.fulcrologic.devtools.common.target :as target]
-   [com.fulcrologic.devtools.common.transit :as encode]
-   [fulcro.inspect.tool :as it]
-   [taoensso.encore :as enc]
-   [taoensso.sente :as sente]
-   [taoensso.timbre :as log]))
+    [clojure.core.async :as async]
+    [com.fulcrologic.devtools.common.built-in-mutations :as bi]
+    [com.fulcrologic.devtools.common.connection :as cc]
+    [com.fulcrologic.devtools.common.message-keys :as mk]
+    [com.fulcrologic.devtools.common.protocols :as dp]
+    [com.fulcrologic.devtools.common.target :as target]
+    [com.fulcrologic.devtools.common.transit :as encode]
+    [fulcro.inspect.tool :as it]
+    [taoensso.encore :as enc]
+    [taoensso.sente :as sente]
+    [taoensso.timbre :as log])
+  (:import (com.fulcrologic.devtools.common.connection Connection)))
 
 ;; Sente packer that matches what the Inspect server expects (transit, same as the electron target).
 (deftype TransitPacker []
@@ -56,27 +57,27 @@
    browser protocol sniffing, and (3) `:type :ws` (the JVM Sente client supports websockets only,
    not the ajax long-poll fallback)."
   [conn]
-  (let [vconfig (.-vconfig ^com.fulcrologic.devtools.common.connection.Connection conn)
+  (let [vconfig (.-vconfig ^Connection conn)
         {:keys [target-id sente-socket-client async-processor send-ch]} (cc/connection-config conn)]
     (when-not sente-socket-client
       (try
         (vswap! vconfig assoc :sente-socket-client
-                (let [client (sente/make-channel-socket-client! "/chsk" "no-token-desired"
-                                                                {:type           :ws
-                                                                 :protocol       :http
-                                                                 :host           *server-host*
-                                                                 :port           *server-port*
-                                                                 :packer         (make-packer)
-                                                                 :wrap-recv-evs? false
-                                                                 :backoff-ms-fn  backoff-ms})]
-                  (add-watch (:state client) ::open-watch
-                             (fn [_ _ {was-open? :open?} {:keys [open?]}]
-                               (when (not= was-open? open?)
-                                 ((:send-fn client) [:fulcrologic.devtool/event {mk/connected? open?
-                                                                                 mk/target-id  target-id}])
-                                 (async-processor [(bi/devtool-connected {:connected? open?
-                                                                          :target-id  target-id})]))))
-                  client))
+          (let [client (sente/make-channel-socket-client! "/chsk" "no-token-desired"
+                         {:type           :ws
+                          :protocol       :http
+                          :host           *server-host*
+                          :port           *server-port*
+                          :packer         (make-packer)
+                          :wrap-recv-evs? false
+                          :backoff-ms-fn  backoff-ms})]
+            (add-watch (:state client) ::open-watch
+              (fn [_ _ {was-open? :open?} {:keys [open?]}]
+                (when (not= was-open? open?)
+                  ((:send-fn client) [:fulcrologic.devtool/event {mk/connected? open?
+                                                                  mk/target-id  target-id}])
+                  (async-processor [(bi/devtool-connected {:connected? open?
+                                                           :target-id  target-id})]))))
+            client))
         (catch Throwable e
           (log/error e "Failed to create JVM Sente client")))
       (log/info "Starting inspect websockets at:" *server-host* ":" *server-port*)
@@ -114,9 +115,9 @@
   (-connect! [_ {:keys [target-id] :as config}]
     (let [target-id (or target-id (random-uuid))
           vconfig   (volatile! (assoc config
-                                      :send-ch (async/chan (async/dropping-buffer 10000))
-                                      :active-requests {}
-                                      :target-id target-id))
+                                 :send-ch (async/chan (async/dropping-buffer 10000))
+                                 :active-requests {}
+                                 :target-id target-id))
           conn      (cc/->Connection vconfig)]
       (start-ws-messaging! conn)
       conn)))
@@ -141,11 +142,11 @@
   (System/setProperty "com.fulcrologic.fulcro.inspect" "true")
   (System/setProperty "com.fulcrologic.devtools.enabled" "true")
   (require 'com.fulcrologic.fulcro.inspect.inspect-client
-           'com.fulcrologic.devtools.common.target)
+    'com.fulcrologic.devtools.common.target)
   (alter-var-root (requiring-resolve 'com.fulcrologic.fulcro.inspect.inspect-client/INSPECT)
-                  (constantly "true"))
+    (constantly "true"))
   (alter-var-root (requiring-resolve 'com.fulcrologic.devtools.common.target/INSPECT)
-                  (constantly "true"))
+    (constantly "true"))
   nil)
 
 (defn add-inspect!

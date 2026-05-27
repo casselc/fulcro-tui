@@ -10,56 +10,44 @@
 
    This is JVM/babashka only (plain `.clj`)."
   (:require
-   [com.fulcrologic.fulcro.raw.components :as rc]
-   [com.fulcrologic.fulcro.tui.engine :as engine]
-   [com.fulcrologic.guardrails.core :refer [>defn >defn- => ?]]))
-
-(>defn transact!
-       "Re-export of `com.fulcrologic.fulcro.raw.components/transact!` for use by TUI
-   event handlers. Submits transaction `tx` against `app-or-component` (optionally
-   with `options`), returning the transaction id."
-       ([app-or-component tx]
-        [any? vector? => any?]
-        (rc/transact! app-or-component tx))
-       ([app-or-component tx options]
-        [any? vector? map? => any?]
-        (rc/transact! app-or-component tx options)))
+    [com.fulcrologic.fulcro.tui.engine :as engine]
+    [com.fulcrologic.guardrails.core :refer [=> >defn >defn- ?]]))
 
 (>defn focused?
-       "Returns true if `id` is the id of the node that currently has focus (per the
-   dynamically bound `engine/*current-focus*`)."
-       [id]
-       [any? => boolean?]
-       (= id engine/*current-focus*))
+  "Returns true if `id` is the id of the node that currently has focus (per the
+dynamically bound `engine/*current-focus*`)."
+  [id]
+  [any? => boolean?]
+  (= id engine/*current-focus*))
 
 (>defn- flatten-children
-        "Returns a vector of `children` with nested sequential collections flattened and `nil`s removed.
-   Nodes, strings, and numbers are retained as-is, in order. This lets callers splice seqs of
-   children (e.g. from `map`) directly into an element's argument list."
-        [children]
-        [sequential? => ::engine/children]
-        (persistent!
-         (reduce
-          (fn [acc c]
-            (cond
-              (nil? c)                              acc
-              (and (sequential? c) (not (engine/node? c))) (reduce conj! acc (flatten-children c))
-              :else                                 (conj! acc c)))
-          (transient [])
-          children)))
+  "Returns a vector of `children` with nested sequential collections flattened and `nil`s removed.
+Nodes, strings, and numbers are retained as-is, in order. This lets callers splice seqs of
+children (e.g. from `map`) directly into an element's argument list."
+  [children]
+  [sequential? => ::engine/children]
+  (persistent!
+    (reduce
+      (fn [acc c]
+        (cond
+          (nil? c) acc
+          (and (sequential? c) (not (engine/node? c))) (reduce conj! acc (flatten-children c))
+          :else (conj! acc c)))
+      (transient [])
+      children)))
 
 (>defn element
-       "Returns a TUI node with the given `tag` built from `args`. If the first of `args` is a map it is
-   used as the node's attributes (otherwise attributes default to `{}`); the remaining `args` become
-   the node's children (flattened, with `nil`s removed). Prefer the named generators (`vbox`, etc.)
-   over calling this directly."
-       [tag args]
-       [::engine/tag (? sequential?) => ::engine/node]
-       (let [args             (or args [])
-             [attrs children] (if (map? (first args))
-                                [(first args) (rest args)]
-                                [{} args])]
-         {::engine/tag tag ::engine/attrs attrs ::engine/children (flatten-children children)}))
+  "Returns a TUI node with the given `tag` built from `args`. If the first of `args` is a map it is
+used as the node's attributes (otherwise attributes default to `{}`); the remaining `args` become
+the node's children (flattened, with `nil`s removed). Prefer the named generators (`vbox`, etc.)
+over calling this directly."
+  [tag args]
+  [::engine/tag (? sequential?) => ::engine/node]
+  (let [args (or args [])
+        [attrs children] (if (map? (first args))
+                           [(first args) (rest args)]
+                           [{} args])]
+    {::engine/tag tag ::engine/attrs attrs ::engine/children (flatten-children children)}))
 
 (defn box
   "Returns a `:box` node: a single styling/padding/border container around `children`. An optional
@@ -130,32 +118,32 @@
   (element :viewport args))
 
 (>defn picker
-       "Returns a `:modal` overlay presenting `options` as a scrollable list of selectable rows — a list
-   picker. Each row is a focusable button, so the focused row IS the highlighted choice: the focus
-   ring moves the highlight (Up/Down/Tab), the enclosing `:viewport` auto-scrolls to keep it visible
-   (PageUp/PageDown page it), Enter selects, and Escape cancels. State and selection handling are the
-   application's responsibility — this is a pure composition of existing nodes. `opts`:
+  "Returns a `:modal` overlay presenting `options` as a scrollable list of selectable rows — a list
+picker. Each row is a focusable button, so the focused row IS the highlighted choice: the focus
+ring moves the highlight (Up/Down/Tab), the enclosing `:viewport` auto-scrolls to keep it visible
+(PageUp/PageDown page it), Enter selects, and Escape cancels. State and selection handling are the
+application's responsibility — this is a pure composition of existing nodes. `opts`:
 
-     * `:id`        - (required) base keyword for the modal and per-row focus ids.
-     * `:open?`     - the picker is shown only when truthy.
-     * `:title`     - optional title painted on the modal border.
-     * `:width`/`:height` - window size in cells (default 40 x 12).
-     * `:options`   - a vector of `{:value :label}` maps (`:value` a keyword/string/symbol, `:label`
-                      the displayed text).
-     * `:on-select` - one-arg handler called with a row's `:value` when its row is activated (Enter).
-     * `:on-cancel` - zero-arg handler called on Escape (wired to the modal's `:on-dismiss`)."
-       [{:keys [id open? title width height options on-select on-cancel]}]
-       [map? => ::engine/node]
-       (modal {:id id :open? open? :title title
-               :width (or width 40) :height (or height 12)
-               :on-dismiss on-cancel}
-              (viewport {:id (keyword (str (name id) "-list")) :grow 1}
-                        (vbox {}
-                              (mapv (fn [{:keys [value label]}]
-                                      (let [row-id (keyword (str (name id) "-" (name value)))]
-                                        (button {:id          row-id
-                                                 :highlight   (focused? row-id)
-                                                 :on-activate (fn [] (when on-select (on-select value)))}
-                                                (str label))))
-                                    options)))))
+* `:id`        - (required) base keyword for the modal and per-row focus ids.
+* `:open?`     - the picker is shown only when truthy.
+* `:title`     - optional title painted on the modal border.
+* `:width`/`:height` - window size in cells (default 40 x 12).
+* `:options`   - a vector of `{:value :label}` maps (`:value` a keyword/string/symbol, `:label`
+                 the displayed text).
+* `:on-select` - one-arg handler called with a row's `:value` when its row is activated (Enter).
+* `:on-cancel` - zero-arg handler called on Escape (wired to the modal's `:on-dismiss`)."
+  [{:keys [id open? title width height options on-select on-cancel]}]
+  [map? => ::engine/node]
+  (modal {:id         id :open? open? :title title
+          :width      (or width 40) :height (or height 12)
+          :on-dismiss on-cancel}
+    (viewport {:id (keyword (str (name id) "-list")) :grow 1}
+      (vbox {}
+        (mapv (fn [{:keys [value label]}]
+                (let [row-id (keyword (str (name id) "-" (name value)))]
+                  (button {:id          row-id
+                           :highlight   (focused? row-id)
+                           :on-activate (fn [] (when on-select (on-select value)))}
+                    (str label))))
+          options)))))
 
