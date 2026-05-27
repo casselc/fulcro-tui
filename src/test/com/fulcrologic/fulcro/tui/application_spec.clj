@@ -29,17 +29,17 @@
   (elements/vbox {:id "root"}
     (elements/input {:id        :a
                      :value     a
-                     :on-change (fn [v _caret] (elements/transact! this [(set-a {:v v})]))})
+                     :on-change (fn [v _caret] (comp/transact! this [(set-a {:v v})]))})
     (elements/input {:id        :b
                      :value     b
-                     :on-change (fn [v _caret] (elements/transact! this [(set-b {:v v})]))})
+                     :on-change (fn [v _caret] (comp/transact! this [(set-b {:v v})]))})
     (elements/button {:id          :ok
                       ;; route-key only fires :on-key, so activation lives there (enter/space).
                       :on-key      (fn [e]
                                      (when (#{:enter " "} (:key e))
-                                       (elements/transact! this [(set-ok {})])
+                                       (comp/transact! this [(set-ok {})])
                                        :handled))
-                      :on-activate (fn [] (elements/transact! this [(set-ok {})]))}
+                      :on-activate (fn [] (comp/transact! this [(set-ok {})]))}
       (if ok? "DONE" "OK"))))
 
 (defn- new-app []
@@ -76,7 +76,7 @@
                      :height     3
                      :width      9
                      :value      notes
-                     :on-change  (fn [v _caret] (elements/transact! this [(set-notes {:v v})]))})))
+                     :on-change  (fn [v _caret] (comp/transact! this [(set-notes {:v v})]))})))
 
 (defn- new-ml-app []
   (app/application {:root-class MLRoot :initial-state true}))
@@ -385,7 +385,7 @@
    :ident         (fn [] [:component/id ::pkroot])
    :initial-state {:pk/open? false :pk/choice nil}}
   (elements/vbox {:id "root"}
-    (elements/button {:id :launch :on-activate (fn [] (elements/transact! this [(open-picker {})]))}
+    (elements/button {:id :launch :on-activate (fn [] (comp/transact! this [(open-picker {})]))}
       (str "Choice: " (or choice "none")))
     (elements/button {:id :other} "Other")
     (elements/picker {:id        :fruit
@@ -394,8 +394,8 @@
                       :width     16
                       :height    6
                       :options   (mapv (fn [i] {:value (keyword (str "f" i)) :label (str "Fruit " i)}) (range 10))
-                      :on-select (fn [v] (elements/transact! this [(pick {:v v})]))
-                      :on-cancel (fn [] (elements/transact! this [(close-picker {})]))})))
+                      :on-select (fn [v] (comp/transact! this [(pick {:v v})]))
+                      :on-cancel (fn [] (comp/transact! this [(close-picker {})]))})))
 
 (defn- new-picker-app []
   (app/application {:root-class PickerRoot :initial-state true}))

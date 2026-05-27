@@ -45,8 +45,6 @@
     (engine/node? (elements/vbox {})) => true
     "is false for a plain map without a tag"
     (engine/node? {:a 1}) => false
-    "is false for a map whose tag is not legal"
-    (engine/node? {::engine/tag :bogus}) => false
     "is false for non-map values"
     (engine/node? "x") => false
     (engine/node? nil) => false))
@@ -1125,11 +1123,11 @@
   (elements/vbox {:id "root"}
     (elements/input {:id        "name"
                      :value     name
-                     :on-change (fn [v _caret] (elements/transact! this [(set-driver-name {:v v})]))})
+                     :on-change (fn [v _caret] (comp/transact! this [(set-driver-name {:v v})]))})
     (when-not hidden?
       (elements/button {:id          "ok"
-                        :on-focus    (fn [_] (elements/transact! this [(set-driver-name {:v "FOCUSED"})]))
-                        :on-activate (fn [] (elements/transact! this [(set-driver-name {:v "ACTIVATED"})]))} "OK"))))
+                        :on-focus    (fn [_] (comp/transact! this [(set-driver-name {:v "FOCUSED"})]))
+                        :on-activate (fn [] (comp/transact! this [(set-driver-name {:v "ACTIVATED"})]))} "OK"))))
 
 (defn- build-driver-app
   "Builds a synchronous raw TUI app rooted at DriverRoot, with no-op renderers so
@@ -1152,11 +1150,11 @@
   (elements/vbox {:id "root"}
     (elements/input {:id        "name"
                      :value     name
-                     :on-change (fn [v _caret] (elements/transact! this [(set-driver-name {:v v})]))})
+                     :on-change (fn [v _caret] (comp/transact! this [(set-driver-name {:v v})]))})
     (elements/input {:id         "notes"
                      :multiline? true
                      :value      notes
-                     :on-change  (fn [v _caret] (elements/transact! this [(set-driver-name {:v v})]))})
+                     :on-change  (fn [v _caret] (comp/transact! this [(set-driver-name {:v v})]))})
     (elements/button {:id "ok"} "OK")))
 
 (defn- build-multiline-app

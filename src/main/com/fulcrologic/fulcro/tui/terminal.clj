@@ -10,7 +10,7 @@
     [clojure.spec.alpha :as s]
     [com.fulcrologic.guardrails.core :refer [=> >def >defn >defn- ?]])
   (:import
-    (org.jline.terminal Terminal TerminalBuilder)
+    (org.jline.terminal  TerminalBuilder)
     (org.jline.utils NonBlockingReader)
     (sun.misc Signal SignalHandler)))
 
@@ -207,7 +207,7 @@ both are incremented."
       (let [[ev _] (decode-key [c])]
         ev))))
 
-(deftype JLineTerminal [^Terminal term resize-handler closed?]
+(deftype JLineTerminal [^org.jline.terminal.Terminal term resize-handler closed?]
   Terminal
   (t-size [_]
     {:rows (.getHeight term) :cols (.getWidth term)})
