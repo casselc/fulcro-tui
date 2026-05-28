@@ -41,7 +41,7 @@
     "uses y as the row and x as the column"
     (sut/cursor-position-string 4 2) => (str ESC "[3;5H")))
 
-(specification {:covers {`sut/decode-key "0b91ac,89b5be"}} "decode-key"
+(specification {:covers {`sut/decode-key "339da7,2ec5c3"}} "decode-key"
   (component "empty input"
     (assertions
       "returns nil when there are no code points"
@@ -121,7 +121,34 @@
       "26 decodes to ctrl+z"
       (select-keys (first (sut/decode-key [26])) [:key :ctrl?]) => {:key "z" :ctrl? true}
       "3 decodes to ctrl+c"
-      (select-keys (first (sut/decode-key [3])) [:key :ctrl?]) => {:key "c" :ctrl? true})))
+      (select-keys (first (sut/decode-key [3])) [:key :ctrl?]) => {:key "c" :ctrl? true}))
+
+  ;; CSI-u (Kitty/fixterms) sequences encode the codepoint as ASCII decimal digits, then an optional
+  ;; `; <modifiers>` (1 + bitmask: 1=shift, 2=alt, 4=ctrl), terminated by `u` (117). Helper builds the
+  ;; byte sequence for a 1-char key with the given modifier field.
+  (letfn [(csi-u [k mods]
+            (let [cp     (int (first k))
+                  digits (mapv int (str cp))
+                  mod-ds (mapv int (str mods))]
+              (vec (concat [27 91] digits [59] mod-ds [117]))))]
+    (component "CSI-u modified-key sequences"
+      (assertions
+        "alt+s (mod 3) decodes to {:key \"s\" :alt? true} with a nil :char"
+        (select-keys (first (sut/decode-key (csi-u "s" 3))) [:key :char :ctrl? :alt? :shift?])
+        => {:key "s" :char nil :ctrl? false :alt? true :shift? false}
+        "ctrl+k (mod 5) decodes to {:key \"k\" :ctrl? true} with a nil :char"
+        (select-keys (first (sut/decode-key (csi-u "k" 5))) [:key :char :ctrl? :alt? :shift?])
+        => {:key "k" :char nil :ctrl? true :alt? false :shift? false}
+        "shift+a (mod 2) is text: keeps :char and sets :shift?"
+        (select-keys (first (sut/decode-key (csi-u "a" 2))) [:key :char :shift?])
+        => {:key "a" :char "a" :shift? true}
+        "alt+shift+x (mod 4) sets both :alt? and :shift?"
+        (select-keys (first (sut/decode-key (csi-u "x" 4))) [:ctrl? :alt? :shift?])
+        => {:ctrl? false :alt? true :shift? true}
+        "consumes exactly the CSI-u sequence, leaving trailing bytes"
+        (second (sut/decode-key (conj (csi-u "s" 3) 98))) => [98]
+        "a CSI-u sequence with no modifier field (ESC [ <cp> u) decodes the bare key"
+        (select-keys (first (sut/decode-key [27 91 49 49 53 117])) [:key :char]) => {:key "s" :char "s"}))))
 
 ;; =============================================================================
 ;; Fake terminal (string-terminal) integration-style tests
@@ -209,6 +236,13 @@
       (sut/t-sync-supported? (sut/string-terminal {:sync? true})) => true
       "is false by default"
       (sut/t-sync-supported? (sut/string-terminal {})) => false))
+
+  (component "t-enhanced-keys? reflects the opts flag"
+    (assertions
+      "is true when :enhanced-keys? is true"
+      (sut/t-enhanced-keys? (sut/string-terminal {:enhanced-keys? true})) => true
+      "is false by default"
+      (sut/t-enhanced-keys? (sut/string-terminal {})) => false))
 
   (component "t-enter!/t-leave! record state"
     (let [t (sut/string-terminal {})]

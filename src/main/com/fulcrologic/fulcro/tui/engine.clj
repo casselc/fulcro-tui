@@ -504,11 +504,12 @@ built-in leaves AND by an unregistered custom tag — so it must NOT re-enter `p
     :bright-blue :bright-magenta :bright-cyan :bright-white})
 
 (>def ::style
-  (s/keys :opt-un [::fg ::bg ::bold? ::reverse?]))
+  (s/keys :opt-un [::fg ::bg ::bold? ::reverse? ::underline?]))
 (>def ::fg ::palette-color)
 (>def ::bg ::palette-color)
 (>def ::bold? boolean?)
 (>def ::reverse? boolean?)
+(>def ::underline? boolean?)
 
 (>def ::ch char?)
 (>def ::sgr ::style)
@@ -603,13 +604,14 @@ cells pass the clip/bounds test, so a wide char is never split across a clip bou
 
 (>defn style->sgr-codes
   "Returns the ordered vector of SGR integer codes for `style`. Attribute codes come first (reverse=7,
-then bold=1), followed by the foreground color code and then the background color code (foreground
-base + 10). The empty/default style yields an empty vector."
+bold=1, underline=4), followed by the foreground color code and then the background color code
+(foreground base + 10). The empty/default style yields an empty vector."
   [style]
   [::style => (s/coll-of nat-int? :kind vector?)]
   (cond-> []
     (:reverse? style) (conj 7)
     (:bold? style) (conj 1)
+    (:underline? style) (conj 4)
     (:fg style) (conj (palette (:fg style)))
     (:bg style) (conj (+ 10 (palette (:bg style))))))
 
@@ -627,14 +629,16 @@ sequence `\"\\u001b[0m\"`."
 
 (>defn node-style
   "Returns the `::style` map implied by a node's `attrs`. `:highlight true` sets `:reverse?`,
-`:color <kw>` sets `:fg`, `:bg <kw>` sets `:bg`, and `:bold true` sets `:bold?`."
+`:color <kw>` sets `:fg`, `:bg <kw>` sets `:bg`, `:bold true` sets `:bold?`, and `:underline true`
+sets `:underline?`."
   [attrs]
   [::attrs => ::style]
   (cond-> {}
     (:highlight attrs) (assoc :reverse? true)
     (:color attrs) (assoc :fg (:color attrs))
     (:bg attrs) (assoc :bg (:bg attrs))
-    (:bold attrs) (assoc :bold? true)))
+    (:bold attrs) (assoc :bold? true)
+    (:underline attrs) (assoc :underline? true)))
 
 (>defn needs-bg-fill?
   "Returns true if a container styled with `style` must fill its area with spaces. Only a background
@@ -770,6 +774,46 @@ tag paints nothing."
   [tag]
   (keyword "paint" (name tag)))
 
+(def ^:dynamic *enhanced-keys?*
+  "True when the terminal's enhanced (Kitty/CSI-u) keyboard protocol is active, bound by the driver
+   during a render. Gates mnemonic-underline rendering: shortcut hints are shown only when the
+   shortcut can actually be captured. Defaults to `false`."
+  false)
+
+(>defn chord-base-key
+  "Returns the base (non-modifier) key of a `key-chord`-form `shortcut`: the last element of a
+modifier vector (e.g. `\"s\"` for `[:alt \"s\"]`), or the chord itself when it is a bare key."
+  [shortcut]
+  [any? => any?]
+  (if (vector? shortcut) (peek shortcut) shortcut))
+
+(>defn- shortcut-mnemonic
+  "Returns the single mnemonic letter (lowercased) implied by a node's `:shortcut` attr — the chord's
+base key when it is a single letter — or nil when there is none (e.g. a special-key chord like `:f2`,
+or a non-letter)."
+  [attrs]
+  [::attrs => (? string?)]
+  (let [base (chord-base-key (:shortcut attrs))]
+    (when (and (string? base) (= 1 (count base)) (Character/isLetter (.charAt ^String base 0)))
+      (str/lower-case base))))
+
+(>defn- paint-mnemonic
+  "Returns `buffer` with the first cell matching mnemonic letter `m` (case-insensitive) across `lines`
+re-painted in `style` plus an underline attribute. `x`/`y` are the content-rect origin; the matching
+column accounts for the display width of the preceding text. Writes are clipped to `clip`. When no
+line contains `m`, the buffer is returned unchanged."
+  [buffer lines x y m style clip]
+  [::buffer (s/coll-of string?) int? int? string? ::style ::rect => ::buffer]
+  (loop [i 0 ls lines]
+    (if (seq ls)
+      (let [line (first ls)
+            idx  (str/index-of (str/lower-case line) m)]
+        (if idx
+          (let [col (+ x (string-width (subs line 0 idx)))]
+            (put-str buffer col (+ y i) (subs line idx (inc idx)) (assoc style :underline? true) clip))
+          (recur (inc i) (rest ls))))
+      buffer)))
+
 (>defn- internal-paint
   "Returns `buffer` after painting a BUILT-IN placed `node` and its descendants (the `paint`
 `:default`), clipping every write to `clip` (the intersection of ancestor rects). Containers draw
@@ -794,12 +838,16 @@ for an unregistered custom tag — it must NOT re-enter `paint`."
         (:text :button)
         (let [lines (if (wrapping-text? node)
                       (wrap-text (text-content node) (:w cr))
-                      (str/split (text-content node) #"\n" -1))]
-          (reduce
-            (fn [b [i line]]
-              (put-str b (:x cr) (+ (:y cr) i) line style content-clip))
-            buffer
-            (map-indexed vector lines)))
+                      (str/split (text-content node) #"\n" -1))
+              buf   (reduce
+                      (fn [b [i line]]
+                        (put-str b (:x cr) (+ (:y cr) i) line style content-clip))
+                      buffer
+                      (map-indexed vector lines))
+              m     (when *enhanced-keys?* (shortcut-mnemonic attrs))]
+          (if m
+            (paint-mnemonic buf lines (:x cr) (:y cr) m style content-clip)
+            buf))
 
         :input
         (if (multiline-input? node)
@@ -1517,6 +1565,109 @@ equal."
   app)
 
 ;; ----------------------------------------------------------------------------
+;; Programmatic focus helpers (containers + focus groups)
+;; ----------------------------------------------------------------------------
+
+(>defn- first-focusable-of
+  "Returns the id of the first focusable (in focus-traversal order) within `node`'s subtree, or nil."
+  [node]
+  [any? => any?]
+  (:id (first (focus-order (focusables node)))))
+
+(>defn- last-focusable-of
+  "Returns the id of the last focusable (in focus-traversal order) within `node`'s subtree, or nil."
+  [node]
+  [any? => any?]
+  (:id (peek (focus-order (focusables node)))))
+
+(>defn first-focusable-in
+  "Returns the id of the first focusable within the subtree rooted at the node with `container-id` in
+`tree` (focus-traversal order), or nil when the container is absent or has no focusables."
+  [tree container-id]
+  [any? any? => any?]
+  (some-> (find-by-id tree container-id) first-focusable-of))
+
+(>defn last-focusable-in
+  "Returns the id of the last focusable within the subtree rooted at the node with `container-id` in
+`tree` (focus-traversal order), or nil. Because to-many subforms append new children, this lands on
+the most-recently-added item when given the items' container id."
+  [tree container-id]
+  [any? any? => any?]
+  (some-> (find-by-id tree container-id) last-focusable-of))
+
+(>defn focus-in!
+  "Sets focus in `app` to `new-id`, firing `:on-lost-focus`/`:on-focus` transitions against `tree`
+(pairs `focus!` with `apply-focus-change!`). Returns `new-id`; a no-op when `new-id` is nil."
+  [app tree new-id]
+  [any? any? any? => any?]
+  (when (some? new-id)
+    (let [old (current-focus app)]
+      (focus! app new-id)
+      (apply-focus-change! app tree old new-id)))
+  new-id)
+
+(>defn focus-first-in!
+  "Moves focus to the first focusable within the `container-id` subtree of `tree` (see
+`first-focusable-in`), firing transitions. Returns the focused id, or nil."
+  [app tree container-id]
+  [any? any? any? => any?]
+  (focus-in! app tree (first-focusable-in tree container-id)))
+
+(>defn focus-last-in!
+  "Moves focus to the last focusable within the `container-id` subtree of `tree` (see
+`last-focusable-in`), firing transitions. Use after adding a to-many child to focus the new item.
+Returns the focused id, or nil."
+  [app tree container-id]
+  [any? any? any? => any?]
+  (focus-in! app tree (last-focusable-in tree container-id)))
+
+(>defn- nodes-with-attr
+  "Returns the vector of nodes in `tree` (pre-order, depth-first) whose attr `k` equals `v`."
+  [tree k v]
+  [any? any? any? => vector?]
+  (let [out (volatile! (transient []))]
+    (letfn [(walk [x]
+              (when (node? x)
+                (when (= v (node-attr x k)) (vswap! out conj! x))
+                (doseq [c (::children x)] (walk c))))]
+      (walk tree))
+    (persistent! @out)))
+
+(>defn focus-group-step!
+  "Moves focus among the members of focus group `group` in `tree`, stepping by `step` (+1 next, -1
+previous) and wrapping. A group member is any node carrying `:focus-group group`; focus lands on that
+member's first focusable descendant, skipping the members' inner fields. The current member is the
+one whose subtree contains the focused node; when focus is outside the group, moves to the first
+member. Returns the newly focused id, or nil when the group has no focusable members."
+  [app tree group step]
+  [any? any? any? int? => any?]
+  (let [paired (into []
+                 (keep (fn [m] (when-let [s (first-focusable-of m)] {:member m :stop s})))
+                 (nodes-with-attr tree :focus-group group))]
+    (when (seq paired)
+      (let [cur     (current-focus app)
+            cur-idx (first (keep-indexed (fn [i {:keys [member]}]
+                                           (when (find-by-id member cur) i))
+                             paired))
+            n       (count paired)
+            target  (:stop (if cur-idx (nth paired (mod (+ cur-idx step) n)) (first paired)))]
+        (focus-in! app tree target)))))
+
+(>defn focus-next-in-group!
+  "Moves focus to the next member of focus group `group` (see `focus-group-step!`). Returns the
+newly focused id, or nil."
+  [app tree group]
+  [any? any? any? => any?]
+  (focus-group-step! app tree group 1))
+
+(>defn focus-prev-in-group!
+  "Moves focus to the previous member of focus group `group` (see `focus-group-step!`). Returns the
+newly focused id, or nil."
+  [app tree group]
+  [any? any? any? => any?]
+  (focus-group-step! app tree group -1))
+
+;; ----------------------------------------------------------------------------
 ;; Multiline caret <-> (row, col) mapping (pure)
 ;; ----------------------------------------------------------------------------
 ;;
@@ -1945,6 +2096,27 @@ closed modal's contents are never focusable and only the active layer's controls
   [any? => any?]
   (strip-overlays (or (peek (collect-overlays node-tree)) node-tree)))
 
+(>defn collect-shortcuts
+  "Returns a map of `key-chord` -> `{:id :action}` for every node in `node-tree` declaring a
+`:shortcut` (a chord in `key-chord` form, e.g. `[:alt \"s\"]` or `:f2`). `:action` is the node's
+`:shortcut-action`, defaulting to `:activate` for `:button` nodes and `:focus` for everything else.
+On a chord collision the last node in document (pre-order) order wins.
+
+Callers gate invocation on the terminal's enhanced-keyboard capability (`*enhanced-keys?*`): when the
+protocol is inactive the shortcut layer is disabled and this is not consulted."
+  [node-tree]
+  [any? => map?]
+  (let [out (volatile! (transient {}))]
+    (letfn [(walk [x]
+              (when (node? x)
+                (when-let [chord (node-attr x :shortcut)]
+                  (let [action (or (node-attr x :shortcut-action)
+                                 (if (= :button (::tag x)) :activate :focus))]
+                    (vswap! out assoc! chord {:id (node-attr x :id) :action action})))
+                (doseq [c (::children x)] (walk c))))]
+      (walk node-tree))
+    (persistent! @out)))
+
 (>defn overlay-window-rect
   "Returns the on-screen `::rect` at which open `modal-node` should be placed within `screen-rect`. The
 window's `:width`/`:height` (a number or `[:fraction f]`, defaulting to the modal's intrinsic size)
@@ -2075,11 +2247,26 @@ terminal size and is handled by a later task."
                               (= :input (::tag focused-node))
                               (true? (node-attr focused-node :multiline?)))
            nav-down?        (and (= k :down) (not multiline-input?))
-           nav-up?          (and (= k :up) (not multiline-input?))]
+           nav-up?          (and (= k :up) (not multiline-input?))
+           ;; Control shortcuts are gated on the enhanced-keyboard protocol and only ever bind
+           ;; modified/function chords, so they can be matched at high precedence (even while an
+           ;; input is focused) without conflicting with typing or focus navigation.
+           shortcut         (when *enhanced-keys?*
+                              (get (collect-shortcuts node-tree) (key-chord key-event)))]
        (cond
          ;; Escape dismisses the active overlay via its (application-supplied) :on-dismiss handler.
          (and overlay? (= k :escape) (node-attr node-tree :on-dismiss))
          ((node-attr node-tree :on-dismiss))
+
+         ;; A declared control shortcut focuses its target (firing transitions) and, when its action
+         ;; is :activate, fires the target's :on-activate ("click"). Reserved app `:global-keymap`
+         ;; chords are intercepted by the input loop before process-key! runs, so they win.
+         shortcut
+         (let [{:keys [id action]} shortcut]
+           (focus! app id)
+           (apply-focus-change! app node-tree old-id id)
+           (when (= action :activate)
+             (some-> (find-by-id node-tree id) activate!)))
 
          (or (= k :backtab) (and (= k :tab) shift?) nav-up?)
          (let [new-id (prev-focus order old-id)]

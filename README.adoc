@@ -147,3 +147,50 @@ cancels):
 See the demo source in this repository for more examples, and the link:Guide.adoc[Fulcro TUI Guide]
 for full coverage of elements, layout, focus/keyboard, overlays, the application lifecycle, and
 headless testing.
+
+== Keyboard shortcuts and terminal support
+
+[IMPORTANT]
+====
+Keyboard shortcuts *require an advanced terminal* that implements the enhanced (Kitty/`CSI u`)
+keyboard protocol — for example *iTerm2* (recent versions), *kitty*, *WezTerm*, *Ghostty*, or
+*foot*. fulcro-tui detects the protocol at startup. On any terminal that does **not** support it
+(including the default macOS *Terminal.app*), the shortcut layer is silently *disabled*: shortcuts do
+not fire and no mnemonic hints are shown. Everything else — Tab/Shift-Tab navigation, arrow keys,
+typing, and overlays — works on every terminal. Only the shortcut layer is gated.
+
+This requirement exists because plain terminals cannot reliably report modified keys: `Alt`/`Option`
+combos are ambiguous (and on macOS `Option` types accented characters unless configured as Meta), and
+several `Ctrl` combinations are reserved by the terminal or OS (flow-control `Ctrl-S`/`Ctrl-Q`, signals
+`Ctrl-C`/`Ctrl-Z`, and `Ctrl-I`/`Ctrl-M`/`Ctrl-H`/`Ctrl-[` which are byte-identical to Tab/Enter/
+Backspace/Escape). The enhanced protocol disambiguates all of these, so we require it rather than ship
+shortcuts that work unpredictably.
+====
+
+Declare a shortcut directly on a control with `:shortcut` (a chord in `tui/key-chord` form). When the
+protocol is active, pressing it focuses the control and — for a button — fires its `:on-activate`
+("clicks" it). The chord's base letter is underlined in the label as a hint:
+
+[source,clojure]
+----
+(tui/button {:id :save :shortcut [:alt "s"]            ; Alt/Option-s; the "S" is underlined
+             :on-activate #(tui/transact! this [(save!)])} "Save")
+
+(tui/input {:id :customer :shortcut [:alt "c"] :value name}) ; inputs default to :shortcut-action :focus
+----
+
+`:shortcut-action` is `:activate` (default for buttons) or `:focus` (default for inputs, which have no
+activation). App-level reserved chords registered in `:global-keymap` (e.g. a quit key) take precedence
+over control shortcuts.
+
+=== Focus control
+
+Focus is a single value in app state; move it programmatically with the helpers in
+`com.fulcrologic.fulcro.tui.engine`:
+
+* `focus-last-in!` / `focus-first-in!` — focus the last/first focusable inside a container subtree.
+  After adding a to-many subform child, call `focus-last-in!` on the *items* container (give the items
+  list its own id, excluding the trailing "+ Add" button) to focus the newly-added item.
+* `focus-next-in-group!` / `focus-prev-in-group!` — jump between members of a `:focus-group` (e.g. from
+  one line-item to the next), skipping the members' inner fields. Tag each member container with the
+  same `:focus-group` key and wire the helpers to a chord such as `Ctrl-Down`/`Ctrl-Up`.

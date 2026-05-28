@@ -110,6 +110,45 @@ leading `27 91`). Returns nil if the sequence is not recognized so the caller ca
         nil)
       :else nil)))
 
+(>defn- read-decimal
+  "Returns `[n remaining]` for the leading run of ASCII decimal digits in `v` (a vector of ints), or
+nil when `v` does not start with a digit."
+  [v]
+  [vector? => (? (s/tuple int? vector?))]
+  (when (and (seq v) (<= 48 (int (first v)) 57))
+    (loop [n 0 v v]
+      (if (and (seq v) (<= 48 (int (first v)) 57))
+        (recur (+ (* n 10) (- (int (first v)) 48)) (subvec v 1))
+        [n v]))))
+
+(>defn- csi-u-event
+  "Returns `[event remaining]` for a Kitty/fixterms CSI-u key sequence, given `rest-ints` (the ints
+AFTER the leading `27 91`). The form is `<codepoint> [; <modifiers>] u` (final byte `u` = 117). The
+modifier field is `1 + bitmask` where bit 0 = shift, bit 1 = alt, bit 2 = ctrl. Returns nil when the
+sequence is not a well-formed CSI-u sequence, so the caller can fall back to `csi-event`.
+
+`:char` is populated only for unmodified or shift-only keys (actual text); ctrl/alt combos carry a
+nil `:char`, matching the legacy control-code decoding."
+  [rest-ints]
+  [(s/coll-of int?) => (? (s/tuple ::key-event (s/coll-of int?)))]
+  (let [v (vec rest-ints)]
+    (when-let [[cp after-cp] (read-decimal v)]
+      (let [[mods after-mods] (if (= (some-> (first after-cp) int) 59) ; ';'
+                                (or (read-decimal (subvec after-cp 1)) [nil after-cp])
+                                [1 after-cp])]
+        (when (and mods (seq after-mods) (= (int (first after-mods)) 117)) ; 'u'
+          (let [bits   (dec mods)
+                ctrl?  (pos? (bit-and bits 4))
+                alt?   (pos? (bit-and bits 2))
+                shift? (pos? (bit-and bits 1))
+                s      (String. (Character/toChars cp))]
+            [(key-event s {:char   (when-not (or ctrl? alt?) s)
+                           :ctrl?  ctrl?
+                           :alt?   alt?
+                           :shift? shift?
+                           :raw    (into [27 91] v)})
+             (subvec after-mods 1)]))))))
+
 (>defn decode-key
   "Decodes the next key from a sequence of input code points `ints`.
 
@@ -119,6 +158,8 @@ Returns `[event remaining-ints]`, consuming exactly the code points for one key,
 * printable ASCII / multi-byte unicode code points -> printable event
 * 9 -> `:tab`; 10 or 13 -> `:enter`; 8 or 127 -> `:backspace`
 * 27 alone (nothing following) -> `:escape`
+* CSI-u sequences (`27 91 <cp> [; <mods>] u`) -> modified keys with `:ctrl?/:alt?/:shift?`
+  (Kitty/fixterms enhanced keyboard protocol)
 * CSI cursor/edit sequences (`27 91 ...`) -> arrows, home/end, delete, page-up/down
 * control combos 1..26 -> `{:ctrl? true :key \"a\"..\"z\"}` (tab/enter handled first)"
   [ints]
@@ -135,7 +176,8 @@ Returns `[event remaining-ints]`, consuming exactly the code points for one key,
           (cond
             (empty? rest) [(key-event :escape {:raw c}) rest]
             (= (int (first rest)) 91)
-            (or (csi-event (subvec v 2))
+            (or (csi-u-event (subvec v 2))
+              (csi-event (subvec v 2))
               ;; unrecognized CSI: treat ESC as escape, leave the rest
               [(key-event :escape {:raw c}) rest])
             ;; ESC + something else: treat ESC as escape (alt-combos not modeled here)
@@ -162,6 +204,10 @@ Returns `[event remaining-ints]`, consuming exactly the code points for one key,
   (t-enter! [t] "Enters raw mode + alternate screen + hides the cursor.")
   (t-leave! [t] "Restores: shows cursor, leaves alt screen, exits raw mode, closes.")
   (t-sync-supported? [t] "Returns true if synchronized output (DEC 2026 / terminfo Sync) is available.")
+  (t-enhanced-keys? [t]
+    "Returns true if the enhanced (Kitty/fixterms CSI-u) keyboard protocol was detected and enabled
+     for this terminal (so modified keys arrive reliably as CSI-u sequences). False otherwise; the
+     keyboard-shortcut layer is gated on this.")
   (t-on-resize! [t handler]
     "Registers zero-arg `handler` to be invoked when the terminal's size changes (e.g. SIGWINCH on a
      real terminal). At most one handler is kept; registering again replaces it. `nil` clears it."))
@@ -171,6 +217,10 @@ Returns `[event remaining-ints]`, consuming exactly the code points for one key,
 (def ^:private ansi-alt-screen-leave "[?1049l")
 (def ^:private ansi-cursor-hide "[?25l")
 (def ^:private ansi-cursor-show "[?25h")
+;; Kitty/fixterms enhanced keyboard protocol (https://sw.kovidgoyal.net/kitty/keyboard-protocol/).
+(def ^:private ansi-kitty-query "[?u")               ; query current flags; conforming terms reply ESC [ ? <flags> u
+(def ^:private ansi-kitty-enable "[>1u")             ; push flags: 1 = disambiguate escape codes (modified keys as CSI-u)
+(def ^:private ansi-kitty-disable "[<1u")            ; pop one flags entry
 
 (>defn cursor-position-string
   "Returns the ANSI escape sequence that moves the cursor to 0-based (`x`,`y`). ANSI is 1-based, so
@@ -208,7 +258,37 @@ both are incremented."
       (let [[ev _] (decode-key [c])]
         ev))))
 
-(deftype JLineTerminal [^org.jline.terminal.Terminal term resize-handler closed?]
+(defn- negotiate-enhanced-keys!
+  "Probes for the Kitty/fixterms enhanced keyboard protocol on the JLine `term` (already in raw mode)
+   and enables it when present. Writes the query, then reads any reply within a short timeout: a
+   conforming terminal answers with `ESC [ ? <flags> u`, while others stay silent (read times out).
+   On a positive reply, pushes the enable flags and returns true; otherwise returns false. The reply
+   bytes are consumed here so they never leak into the input loop."
+  [^org.jline.terminal.Terminal term]
+  (try
+    (let [w (.writer term)
+          r ^NonBlockingReader (.reader term)]
+      (.write w ^String ansi-kitty-query)
+      (.flush w)
+      (let [first-c (.read r 80)]                          ; wait up to 80ms for the start of a reply
+        (if (or (= first-c NonBlockingReader/READ_EXPIRED) (= first-c NonBlockingReader/EOF))
+          false
+          (let [reply (loop [acc (transient [(int first-c)])]
+                        (let [n (.read r 20)]
+                          (if (or (= n NonBlockingReader/READ_EXPIRED)
+                                (= n NonBlockingReader/EOF)
+                                (= (int n) 117))           ; 'u' terminates the reply
+                            (persistent! (cond-> acc (and (int? n) (= (int n) 117)) (conj! 117)))
+                            (recur (conj! acc (int n))))))
+                ok?   (and (= (take 3 reply) [27 91 63])   ; ESC [ ?
+                        (= (peek reply) 117))]
+            (when ok?
+              (.write w ^String ansi-kitty-enable)
+              (.flush w))
+            (boolean ok?)))))
+    (catch Throwable _ false)))
+
+(deftype JLineTerminal [^org.jline.terminal.Terminal term resize-handler closed? enhanced?]
   Terminal
   (t-size [_]
     {:rows (.getHeight term) :cols (.getWidth term)})
@@ -226,13 +306,17 @@ both are incremented."
     (.enterRawMode term)
     (t-write! this ansi-alt-screen-enter)
     (t-write! this ansi-cursor-hide)
-    (t-flush! this))
+    (t-flush! this)
+    ;; Probe + enable the enhanced keyboard protocol (raw mode is required so the reply is not
+    ;; line-buffered or echoed). Must run before the input loop starts so the reply is consumed here.
+    (reset! enhanced? (negotiate-enhanced-keys! term)))
   (t-leave! [this]
     ;; Idempotent: `quit!` and the input loop's `finally` both call `t-leave!`, and on Ctrl-Q they
     ;; race on the same terminal. The first call restores the screen and closes the JLine terminal;
     ;; a second call must NOT touch it (writing to a closed terminal throws
     ;; `IllegalStateException: Terminal has been closed`). The CAS ensures only the first runs.
     (when (compare-and-set! closed? false true)
+      (when @enhanced? (t-write! this ansi-kitty-disable)) ; pop our pushed flags before leaving
       (t-write! this ansi-cursor-show)
       (t-write! this ansi-alt-screen-leave)
       (t-flush! this)
@@ -240,6 +324,7 @@ both are incremented."
   (t-sync-supported? [_]
     ;; best-effort: this JLine/terminfo build has no Sync capability enum, so report false.
     false)
+  (t-enhanced-keys? [_] (boolean @enhanced?))
   (t-on-resize! [_ handler]
     (reset! resize-handler handler)
     ;; Deliver terminal-resize (SIGWINCH) to the registered handler. We use `sun.misc.Signal`
@@ -263,7 +348,7 @@ both are incremented."
   "Returns a `Terminal` backed by a system JLine terminal (`TerminalBuilder`)."
   []
   (let [term (.. (TerminalBuilder/builder) (system true) (build))]
-    (->JLineTerminal term (atom nil) (atom false))))
+    (->JLineTerminal term (atom nil) (atom false) (atom false))))
 
 ;; =============================================================================
 ;; Fake terminal (string-terminal)
@@ -292,6 +377,8 @@ both are incremented."
     nil)
   (t-sync-supported? [_]
     (boolean (:sync? @state)))
+  (t-enhanced-keys? [_]
+    (boolean (:enhanced-keys? @state)))
   (t-on-resize! [_ handler]
     (swap! state assoc :on-resize handler)
     nil))
@@ -303,11 +390,13 @@ both are incremented."
    * `:cols` - terminal width (default 80)
    * `:keys` - a seq of scripted `::key-event`s that `t-read-key` will dequeue, in order
    * `:sync?` - the boolean reported by `t-sync-supported?` (default false)
+   * `:enhanced-keys?` - the boolean reported by `t-enhanced-keys?` (default false)
 
    Use the accessors `output`, `cursor`, `feed!`, and `resize!` to drive/inspect it."
-  [{:keys [rows cols keys sync?] :or {rows 24 cols 80 keys []}}]
+  [{:keys [rows cols keys sync? enhanced-keys?] :or {rows 24 cols 80 keys []}}]
   (->StringTerminal (atom {:rows   rows :cols cols :keys (vec keys)
-                           :output "" :cursor nil :sync? (boolean sync?)})))
+                           :output "" :cursor nil :sync? (boolean sync?)
+                           :enhanced-keys? (boolean enhanced-keys?)})))
 
 (defn output
   "Returns the accumulated string written to the fake terminal `t`."

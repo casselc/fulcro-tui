@@ -340,10 +340,13 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
                                  (inject-scroll app (engine/place overlay (engine/overlay-window-rect overlay screen)))))
               active-placed  (or overlay-placed base-placed)
               buf            (p `paint
-                               (if too-small?
-                                 (too-small-buffer rows cols min-width min-height)
-                                 (cond-> (engine/render-buffer base-placed rows cols)
-                                   overlay-placed (engine/paint overlay-placed screen))))
+                               ;; `*enhanced-keys?*` gates mnemonic-underline rendering: hints are
+                               ;; painted only when the enhanced keyboard protocol is active.
+                               (binding [engine/*enhanced-keys?* (term/t-enhanced-keys? terminal)]
+                                 (if too-small?
+                                   (too-small-buffer rows cols min-width min-height)
+                                   (cond-> (engine/render-buffer base-placed rows cols)
+                                     overlay-placed (engine/paint overlay-placed screen)))))
               last-size      (::last-size rt)
               size           {:rows rows :cols cols}
               resized?       (boolean (and last-size (not= last-size size)))
@@ -599,7 +602,10 @@ terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
                                    (do
                                      ;; nil global-keymap here mirrors the prior `(step! app k)` call;
                                      ;; reserved chords are already handled by the branch above.
-                                     (dispatch-key! app k nil)
+                                     ;; `*enhanced-keys?*` gates control-shortcut dispatch in
+                                     ;; `engine/process-key!` to terminals that support the protocol.
+                                     (binding [engine/*enhanced-keys?* (term/t-enhanced-keys? terminal)]
+                                       (dispatch-key! app k nil))
                                      (request-render! app)))
                                  (catch Throwable t
                                    (record-error! app t)

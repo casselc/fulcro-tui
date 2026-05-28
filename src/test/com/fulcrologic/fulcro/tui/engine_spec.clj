@@ -134,6 +134,48 @@
     "is false for a non-node"
     (engine/wrapping-text? "x") => false))
 
+(defn- row0-underlined
+  "Returns the seq of chars in row 0 of `buf` whose cell style has `:underline?` set."
+  [buf cols]
+  (->> (range cols)
+    (keep (fn [c] (let [{:keys [ch sgr]} (get-in buf [:cells c])]
+                    (when (:underline? sgr) ch))))))
+
+(specification "style->sgr-codes underline"
+  (assertions
+    "maps :underline? to SGR code 4, after reverse/bold and before colors"
+    (engine/style->sgr-codes {:underline? true}) => [4]
+    (engine/style->sgr-codes {:bold? true :underline? true :fg :red}) => [1 4 31]
+    "omits 4 when :underline? is falsey"
+    (engine/style->sgr-codes {:fg :red}) => [31]))
+
+(specification {:covers {`engine/chord-base-key "99c2c3"}} "mnemonic underline rendering"
+  (component "a control's :shortcut underlines the matching label letter when enhanced keys are active"
+    (let [btn (engine/place (elements/button {:id :save :shortcut [:alt "s"]} "Save") {:x 0 :y 0 :w 10 :h 1})
+          on  (binding [engine/*enhanced-keys?* true]  (engine/render-buffer btn 1 10))
+          off (binding [engine/*enhanced-keys?* false] (engine/render-buffer btn 1 10))]
+      (assertions
+        "the first matching label cell is underlined under the enhanced protocol"
+        (row0-underlined on 10) => [\S]
+        "nothing is underlined when the enhanced protocol is inactive"
+        (row0-underlined off 10) => []
+        "the label text itself is unchanged"
+        (str/trim (first (engine/screen on))) => "Save")))
+
+  (component "whole-node :underline underlines every cell"
+    (let [txt (engine/place (elements/text {:underline true} "Hi") {:x 0 :y 0 :w 4 :h 1})
+          buf (engine/render-buffer txt 1 4)]
+      (assertions
+        "both characters carry the underline attribute"
+        (row0-underlined buf 4) => [\H \i])))
+
+  (component "a special-key chord produces no mnemonic underline"
+    (let [btn (engine/place (elements/button {:id :go :shortcut :f2} "Go") {:x 0 :y 0 :w 6 :h 1})
+          buf (binding [engine/*enhanced-keys?* true] (engine/render-buffer btn 1 6))]
+      (assertions
+        "there is no single letter to underline for :f2"
+        (row0-underlined buf 6) => []))))
+
 (specification "wrapping text layout (height-for-width)"
   (component "place in a vbox: height is the wrapped line count at the container width"
     (let [placed (engine/place (elements/vbox {} (elements/text {:wrap true} "the quick brown fox jumps"))
@@ -207,7 +249,7 @@
   [placed]
   (mapv ::engine/rect (::engine/children placed)))
 
-(specification {:covers {`engine/place "b3e3fa,590943"}} "place"
+(specification {:covers {`engine/place "3667ed,69acf7"}} "place"
   (component "the node's own rect"
     (assertions
       "is the outer rect it was placed in"
@@ -407,7 +449,7 @@
         "does not write a wide char whose second cell falls outside the clip"
         (engine/screen (engine/put-str b 0 0 "一" {} {:x 0 :y 0 :w 1 :h 1})) => ["      "]))))
 
-(specification {:covers {`engine/style->sgr-codes "6366c4,851723"}} "style->sgr-codes"
+(specification {:covers {`engine/style->sgr-codes "d154c2,851723"}} "style->sgr-codes"
   (assertions
     "returns an empty vector for the default style"
     (engine/style->sgr-codes {}) => []
@@ -429,8 +471,8 @@
     "yields the reset sequence for an empty codes vector"
     (engine/sgr-string []) => "[0m"))
 
-(specification {:covers {`engine/render-buffer "e06fec,fce04b"
-                         `engine/paint         "9cb0a6,dc3f9b"}} "render-buffer / paint"
+(specification {:covers {`engine/render-buffer "e06fec,93fec6"
+                         `engine/paint         "643160,702f9c"}} "render-buffer / paint"
   (component "stacked leaves"
     (let [tree (engine/place (elements/vbox {}
                                (elements/text {} "Hello")
@@ -542,7 +584,7 @@
       "exposes the style of each cell"
       (mapv :sgr (first out)) => [{:fg :red} {}])))
 
-(specification {:covers {`engine/diff "5b944f,045a15"}} "diff"
+(specification {:covers {`engine/diff "5b944f,410e72"}} "diff"
   (let [b1 (engine/make-buffer 1 5)
         ab (engine/put-str b1 0 0 "abc" {} {:x 0 :y 0 :w 5 :h 1})]
     (component "unchanged buffers"
@@ -590,7 +632,7 @@
     "returns the empty string for no ops"
     (engine/ops->ansi []) => ""))
 
-(specification {:covers {`engine/frame->ansi "9eafc2,3b7c6b"}} "frame->ansi"
+(specification {:covers {`engine/frame->ansi "9eafc2,c3ac74"}} "frame->ansi"
   (let [b1  (engine/make-buffer 1 5)
         nxt (engine/put-str b1 0 0 "X" {} {:x 0 :y 0 :w 5 :h 1})]
     (assertions
@@ -599,7 +641,7 @@
       "does not wrap the diff when :sync? is false"
       (engine/frame->ansi b1 nxt {:sync? false}) => "[1;1HX")))
 
-(specification {:covers {`engine/frame->ansi "9eafc2,3b7c6b"}} "frame->ansi — clear-screen on resize"
+(specification {:covers {`engine/frame->ansi "9eafc2,c3ac74"}} "frame->ansi — clear-screen on resize"
   (let [b1  (engine/make-buffer 1 5)
         nxt (engine/put-str b1 0 0 "X" {} {:x 0 :y 0 :w 5 :h 1})]
     (assertions
@@ -1168,6 +1210,158 @@
     (rapp/initialize-state! app MultilineRoot)
     app))
 
+;; A root with an input and two shortcut buttons — for control-shortcut dispatch.
+(comp/defsc ShortcutRoot [this {:keys [driver/name]}]
+  {:query         [:driver/name]
+   :ident         (fn [] [:component/id ::sc])
+   :initial-state {:driver/name "AB"}}
+  (elements/vbox {:id "root"}
+    (elements/input {:id        "name"
+                     :value     name
+                     :on-change (fn [v _caret] (comp/transact! this [(set-driver-name {:v v})]))})
+    (elements/button {:id "cancel" :shortcut [:alt "c"] :shortcut-action :focus} "Cancel")
+    (elements/button {:id          "save" :shortcut [:alt "s"]
+                      :on-activate (fn [] (comp/transact! this [(set-driver-name {:v "SAVED"})]))} "Save")))
+
+(defn- build-shortcut-app
+  "Builds a synchronous raw TUI app rooted at ShortcutRoot."
+  []
+  (let [app (stx/with-synchronous-transactions
+              (rapp/fulcro-app {:root-class        ShortcutRoot
+                                :core-render!      (fn [_app _opts] true)
+                                :optimized-render! (fn [_app _opts] true)
+                                :render-root!      (constantly true)}))]
+    (rapp/initialize-state! app ShortcutRoot)
+    app))
+
+(defn- alt-key
+  "Returns a key-event map for Alt+`letter`."
+  [letter]
+  {:key letter :char nil :ctrl? false :alt? true :shift? false})
+
+(specification {:covers {`engine/collect-shortcuts "ca9738,805ed0"}} "control shortcut dispatch (process-key!)"
+  (component "an :activate shortcut (button default) focuses the target and fires :on-activate"
+    (let [app (build-shortcut-app)
+          sa  (:com.fulcrologic.fulcro.application/state-atom app)]
+      (engine/focus! app "name")
+      (binding [engine/*enhanced-keys?* true]
+        (engine/process-key! app (alt-key "s")))
+      (assertions
+        "focus moved to the save button"
+        (engine/current-focus app) => "save"
+        "the button's :on-activate fired (transacted SAVED)"
+        (:driver/name @sa) => "SAVED")))
+
+  (component "a :focus shortcut-action moves focus without activating"
+    (let [app (build-shortcut-app)
+          sa  (:com.fulcrologic.fulcro.application/state-atom app)]
+      (engine/focus! app "name")
+      (binding [engine/*enhanced-keys?* true]
+        (engine/process-key! app (alt-key "c")))
+      (assertions
+        "focus moved to the cancel button"
+        (engine/current-focus app) => "cancel"
+        "nothing was activated (name unchanged)"
+        (:driver/name @sa) => "AB")))
+
+  (component "a shortcut fires even while a text input is focused"
+    (let [app (build-shortcut-app)
+          sa  (:com.fulcrologic.fulcro.application/state-atom app)]
+      (engine/focus! app "name")                            ; the input has focus
+      (binding [engine/*enhanced-keys?* true]
+        (engine/process-key! app (alt-key "s")))
+      (assertions
+        "the alt chord reaches the shortcut layer rather than being typed into the input"
+        (:driver/name @sa) => "SAVED")))
+
+  (component "shortcuts are inert when the enhanced protocol is inactive"
+    (let [app (build-shortcut-app)
+          sa  (:com.fulcrologic.fulcro.application/state-atom app)]
+      (engine/focus! app "name")
+      (engine/process-key! app (alt-key "s"))               ; *enhanced-keys?* defaults to false
+      (assertions
+        "focus did not move"
+        (engine/current-focus app) => "name"
+        "no activation happened"
+        (:driver/name @sa) => "AB"))))
+
+;; A root modelling a to-many subform: an items list (its own container, excluding the trailing
+;; Add button) holding two item subforms each tagged with the same :focus-group, plus Add and Save.
+(comp/defsc FocusGroupRoot [_this _props]
+  {:query         [:fg/x]
+   :ident         (fn [] [:component/id ::fg])
+   :initial-state {:fg/x 1}}
+  (elements/vbox {:id "root"}
+    (elements/vbox {:id "items"}
+      (elements/vbox {:id "item-list"}
+        (elements/vbox {:id "item-1" :focus-group :line-items}
+          (elements/input {:id "i1a" :value ""})
+          (elements/input {:id "i1b" :value ""}))
+        (elements/vbox {:id "item-2" :focus-group :line-items}
+          (elements/input {:id "i2a" :value ""})
+          (elements/input {:id "i2b" :value ""})))
+      (elements/button {:id "add"} "+ Add"))
+    (elements/button {:id "save"} "Save")))
+
+(defn- build-focus-group-app []
+  (let [app (stx/with-synchronous-transactions
+              (rapp/fulcro-app {:root-class        FocusGroupRoot
+                                :core-render!      (fn [_app _opts] true)
+                                :optimized-render! (fn [_app _opts] true)
+                                :render-root!      (constantly true)}))]
+    (rapp/initialize-state! app FocusGroupRoot)
+    app))
+
+(specification {:covers {`engine/last-focusable-in     "9fce33,aac4be"
+                         `engine/first-focusable-in    "b37192,cbaf93"
+                         `engine/focus-in!             "050509,272001"
+                         `engine/focus-first-in!       "f6c47f,d641d8"
+                         `engine/focus-last-in!        "b3c124,0fe225"
+                         `engine/focus-next-in-group!  "0c9bca,c9db9a"
+                         `engine/focus-prev-in-group!  "2b4b4d,c9db9a"
+                         `engine/focus-group-step!     "fec179,ff2404"}} "programmatic focus helpers"
+  (component "last/first-focusable-in scope to a container's subtree"
+    (let [app  (build-focus-group-app)
+          tree (engine/current-node-tree app)]
+      (assertions
+        "last focusable in the items list is the last item's last field (the new item after an add)"
+        (engine/last-focusable-in tree "item-list") => "i2b"
+        "first focusable in the items list is the first item's first field"
+        (engine/first-focusable-in tree "item-list") => "i1a"
+        "scoping to a single item finds that item's first field"
+        (engine/first-focusable-in tree "item-2") => "i2a"
+        "an absent container yields nil"
+        (engine/last-focusable-in tree "nope") => nil)))
+
+  (component "focus-last-in! / focus-first-in! move focus and fire transitions"
+    (let [app  (build-focus-group-app)
+          tree (engine/current-node-tree app)]
+      (assertions
+        "focus-last-in! lands on the newest item's last field"
+        (do (engine/focus-last-in! app tree "item-list") (engine/current-focus app)) => "i2b"
+        "focus-first-in! lands on the first field"
+        (do (engine/focus-first-in! app tree "item-list") (engine/current-focus app)) => "i1a")))
+
+  (component "focus-next/prev-in-group! jump item-to-item, skipping inner fields, wrapping"
+    (let [app  (build-focus-group-app)
+          tree (engine/current-node-tree app)]
+      (engine/focus! app "i1b")                             ; focus is on an inner field of item-1
+      (assertions
+        "next-in-group skips i1's remaining fields and lands on item-2's first field"
+        (do (engine/focus-next-in-group! app tree :line-items) (engine/current-focus app)) => "i2a"
+        "next-in-group from the last member wraps to the first member"
+        (do (engine/focus-next-in-group! app tree :line-items) (engine/current-focus app)) => "i1a"
+        "prev-in-group from the first member wraps to the last"
+        (do (engine/focus-prev-in-group! app tree :line-items) (engine/current-focus app)) => "i2a")))
+
+  (component "group step from outside the group goes to the first member"
+    (let [app  (build-focus-group-app)
+          tree (engine/current-node-tree app)]
+      (engine/focus! app "save")                            ; not inside any group member
+      (assertions
+        "next-in-group lands on the first member's first field"
+        (do (engine/focus-next-in-group! app tree :line-items) (engine/current-focus app)) => "i1a"))))
+
 (specification {:covers {`engine/current-focus "8b7584"
                          `engine/focus!        "efb19d,dc1929"}} "current-focus / focus!"
   (let [app (build-driver-app)]
@@ -1180,7 +1374,7 @@
       "current-focus also reads from a bare state-map"
       (engine/current-focus {::engine/focus "name"}) => "name")))
 
-(specification {:covers {`engine/process-key! "e4ad3e,214cf9"}} "process-key!"
+(specification {:covers {`engine/process-key! "8d7c68,19b0cb"}} "process-key!"
   (component "Enter or Space activates a focused button"
     (let [app (build-driver-app)
           sa  (:com.fulcrologic.fulcro.application/state-atom app)]
@@ -1356,8 +1550,8 @@
     (engine/overlay-window-rect (elements/modal {:id :d :width 10 :height 4 :align :start}) {:x 0 :y 0 :w 20 :h 8})
     => {:x 0 :y 0 :w 10 :h 4}))
 
-(specification {:covers {`engine/paint "9cb0a6,dc3f9b"
-                         `engine/place "b3e3fa,590943"}} "modal layout & paint"
+(specification {:covers {`engine/paint "643160,702f9c"
+                         `engine/place "3667ed,69acf7"}} "modal layout & paint"
   (let [m      (elements/modal {:id :d :title "Menu" :width 10 :height 4} (elements/text {} "hi"))
         placed (engine/place m {:x 2 :y 1 :w 10 :h 4})
         ;; paint a full-screen base first, then the modal on top, to prove opacity.

@@ -58,7 +58,12 @@ over calling this directly."
 
 (defn button
   "Returns a `:button` node rendering `children` as its label. An optional leading attribute map sets
-   `:id`, `:on-activate`, and style attributes."
+   `:id`, `:on-activate`, and style attributes. It may also declare a keyboard shortcut:
+
+   * `:shortcut` - a chord in `key-chord` form (e.g. `[:alt \"s\"]`, `:f2`, `[:ctrl \"k\"]`). When the
+     enhanced keyboard protocol is active, pressing it focuses this control and (by default) fires
+     `:on-activate`. The chord's base letter is underlined in the label as a mnemonic hint.
+   * `:shortcut-action` - `:activate` (default for buttons) or `:focus` (focus only)."
   [& args]
   (element :button args))
 
@@ -70,7 +75,9 @@ over calling this directly."
 
 (defn input
   "Returns an `:input` leaf node from the given `attrs` map. Inputs are controlled: `:value` (and
-   optionally `:caret`) come from props, and `:on-change` receives proposed edits."
+   optionally `:caret`) come from props, and `:on-change` receives proposed edits. An input may also
+   declare a `:shortcut` (see `button`); its `:shortcut-action` defaults to `:focus` (an input has no
+   activation), so the shortcut jumps focus into the field."
   [attrs]
   (element :input [attrs]))
 
