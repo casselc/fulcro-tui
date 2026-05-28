@@ -100,9 +100,10 @@
         subform?  (fn [a] (some? (fo/subform-options options a)))
         render-a  (fn [a] (when (and a (not (ao/identity? a)) (not (subform? a)))
                             (scform/render-field env a)))]
-    (if (vector? layout)
-      (vbox {} (mapv (fn [row] (vbox {} (mapv (fn [k] (render-a (k->attr k))) row))) layout))
-      (vbox {} (mapv render-a attributes)))))
+    ;; Render in `fo/layout` order when given (each row's fields stacked — vertical reads best in a
+    ;; width-limited terminal, and pick-one/enum fields render their own modal subtree), else attr order.
+    (let [ks (if (vector? layout) (into [] (mapcat identity) layout) (mapv ao/qualified-key attributes))]
+      (vbox {} (mapv (fn [k] (render-a (k->attr k))) ks)))))
 
 ;; ── render-element defmethods (the 0.1.5 form structural-rendering contract) ──────────────────────
 

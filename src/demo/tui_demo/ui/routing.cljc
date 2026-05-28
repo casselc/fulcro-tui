@@ -8,18 +8,24 @@
     [com.fulcrologic.statecharts.chart :refer [statechart]]
     [com.fulcrologic.statecharts.integration.fulcro :as scf]
     [com.fulcrologic.statecharts.integration.fulcro.routing :as scr]
+    [tui-demo.ui.account-forms :refer [AccountForm AccountList]]
     [tui-demo.ui.invoice-form :refer [InvoiceForm]]
     [tui-demo.ui.invoice-report :refer [InvoiceReport]]
+    [tui-demo.ui.item-forms :refer [InventoryReport ItemForm]]
     [tui-demo.ui.root :refer [Routes]]))
 
 (def routing-chart
-  "One chart for the whole app: a routes region containing the invoice report and form."
+  "One chart for the whole app: a routes region containing every report and its edit form.
+   Reports route to their forms via `form/edit!`/`create!`; the root nav switches between reports."
   (statechart {:initial :state/route-root}
     (scr/routing-regions
       (scr/routes {:id :state/root :routing/root Routes}
         (report/report-route-state {:route/target InvoiceReport})
-        (form/form-route-state {:route/target InvoiceForm
-                                :route/params #{:id}})))))
+        (form/form-route-state {:route/target InvoiceForm :route/params #{:id}})
+        (report/report-route-state {:route/target AccountList})
+        (form/form-route-state {:route/target AccountForm :route/params #{:id}})
+        (report/report-route-state {:route/target InventoryReport})
+        (form/form-route-state {:route/target ItemForm :route/params #{:id}})))))
 
 (defn install!
   "Installs the statechart engine on `app` and starts the routing chart.

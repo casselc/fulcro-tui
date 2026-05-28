@@ -4,7 +4,9 @@
    attributes — so the model namespaces carry no Datomic dependency and remain
    loadable on the (babashka) client."
   (:require
+    [com.fulcrologic.rad.database-adapters.datomic-options :as do]
     [com.wsscode.pathom.connect :as pc]
+    [datomic.client.api :as d]
     [tui-demo.server.queries :as queries]))
 
 (pc/defresolver all-accounts-resolver [{:keys [query-params] :as env} _]
@@ -33,11 +35,20 @@
   (when-let [cid (queries/get-line-item-category env id)]
     {:line-item/category {:category/id cid}}))
 
+(pc/defmutation set-account-active-mutation [env {:account/keys [id active?]}]
+  {::pc/sym    'tui-demo.model.account/set-account-active
+   ::pc/params [:account/id :account/active?]
+   ::pc/output [:account/id :account/active?]}
+  (let [conn (get-in env [do/connections :production])]
+    (d/transact conn {:tx-data [{:account/id id :account/active? active?}]})
+    {:account/id id :account/active? active?}))
+
 (def resolvers
-  "Source-attribute and derived resolvers for the demo."
+  "Source-attribute and derived resolvers (and mutations) for the demo."
   [all-accounts-resolver
    all-invoices-resolver
    account-invoices-resolver
    all-categories-resolver
    all-items-resolver
-   line-item-category-resolver])
+   line-item-category-resolver
+   set-account-active-mutation])

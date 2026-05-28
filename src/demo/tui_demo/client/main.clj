@@ -7,11 +7,14 @@
     [com.fulcrologic.fulcro.raw.components :as rc]
     [com.fulcrologic.fulcro.tui.application :as tui-app]
     [com.fulcrologic.rad.application :as rad-app]
+    [com.fulcrologic.rad.control :as control]
+    [com.fulcrologic.rad.picker-options :as po]
     [com.fulcrologic.rad.type-support.date-time :as dt]
     [com.fulcrologic.statecharts.integration.fulcro.routing :as scr]
     [taoensso.timbre :as log]
     [tui-demo.client.remote :as remote]
     [tui-demo.rendering.tui.plugin :as tui-plugin]
+    [tui-demo.ui.item-forms :refer [InventoryReport]]
     [tui-demo.ui.invoice-report :refer [InvoiceReport]]
     [tui-demo.ui.root :as root]
     [tui-demo.ui.routing :as routing]))
@@ -35,9 +38,13 @@
                                [:ctrl "l"] (fn [a _] (tui-app/redraw! a))}})]
     (rad-app/install-ui-controls! app tui-plugin/all-controls)
     (routing/install! app)
-    ;; Preload the account list so the invoice form's customer pick-one has options to cycle.
-    ;; (A render-time po/load-options! does not reliably populate the cache in the synchronous TUI.)
+    ;; Preload the account list so the invoice form's customer pick-one has options immediately.
     (df/load! app :account/all-accounts AccountOption)
+    ;; Preload the Inventory report's category-filter picker options (the picker control renders pure —
+    ;; it never self-loads — so we seed its options cache here using the report's own control config).
+    (let [ctl (get-in (rc/component-options InventoryReport)
+                [::control/controls :tui-demo.ui.item-forms/category])]
+      (po/load-picker-options! app InventoryReport {} ctl))
     app))
 
 (defn -main [& _args]

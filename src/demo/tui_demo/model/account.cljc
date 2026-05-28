@@ -6,6 +6,7 @@
   (:refer-clojure :exclude [name])
   (:require
     [clojure.string :as str]
+    [com.fulcrologic.fulcro.mutations :refer [defmutation]]
     [com.fulcrologic.rad.attributes :refer [defattr]]
     [com.fulcrologic.rad.attributes-options :as ao]
     [com.fulcrologic.rad.form-options :as fo]))
@@ -74,3 +75,11 @@
 
 (def attributes
   [id name email active? role primary-address addresses all-accounts account-invoices])
+
+(defmutation set-account-active
+  "Sets an account's `:account/active?` flag. Optimistically updates the client, then persists to the
+   server (handled by the matching Pathom mutation in `tui-demo.server.resolvers`)."
+  [{:account/keys [id active?]}]
+  (action [{:keys [state]}]
+    (swap! state assoc-in [:account/id id :account/active?] active?))
+  (remote [_] true))

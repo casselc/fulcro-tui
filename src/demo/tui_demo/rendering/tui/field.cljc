@@ -447,9 +447,11 @@
         (str (if value " [x] " " [ ] ") (or label (name control-key)))))))
 
 (defn render-picker-control
-  "Renders a `:picker` control as a button + modal list. Options are loaded into the picker-options
-   cache via `po/load-picker-options!` (server-backed); selecting sets the control parameter and runs
-   the control's `:action`."
+  "Renders a `:picker` control as a button + modal list. Selecting sets the control parameter and runs
+   the control's `:action` (e.g. `report/filter-rows!`). Options come from the picker-options cache
+   (`po/current-picker-options`); they must be preloaded into that cache at startup (a render-time
+   `po/load-picker-options!` would re-stamp state every frame and loop), e.g. via `po/load-picker-options!`
+   in `client/main`."
   [{:keys [instance control-key control]}]
   (let [{:keys [label action visible?]} control
         label     (?! label instance)
@@ -458,9 +460,7 @@
         options   (vec (po/current-picker-options instance control))
         ctl-id    (keyword "control" (name control-key))
         pick-id   (keyword "control-pick" (name control-key))
-        cur-lbl   (some (fn [{:keys [text value]}] (when (= value (control/current-value instance control-key)) text)) options)]
-    ;; Ensure options are loaded (cheap when cached).
-    (po/load-picker-options! instance (comp/react-type instance) (comp/props instance) control)
+        cur-lbl   (some (fn [opt] (when (= (:value opt) value) (:text opt))) options)]
     (when visible?
       (vbox {}
         (hbox {:height 1}
