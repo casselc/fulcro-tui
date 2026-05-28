@@ -12,6 +12,7 @@
   (:require
     [com.fulcrologic.fulcro.components :as comp]
     [com.fulcrologic.fulcro.tui.elements :as e :refer [vbox hbox box text button line viewport]]
+    [com.fulcrologic.fulcro.tui.engine :as engine]
     [com.fulcrologic.rad.attributes-options :as ao]
     [com.fulcrologic.rad.form :as form]
     [com.fulcrologic.rad.form-options :as fo]
@@ -37,34 +38,51 @@
   "Renders one subform `ref-key` (declared in `fo/subforms`) as a bordered block: each child rendered
    via its own form factory (recursing through `render-element`), with Add/Delete controls for to-many."
   [{::form/keys [form-instance master-form] :as _env} ref-key subform-opts]
-  (let [Sub        (fo/ui subform-opts)
-        props      (comp/props form-instance)
-        data       (get props ref-key)
-        can-add?   (?! (fo/can-add? subform-opts) form-instance ref-key)
+  (let [Sub         (fo/ui subform-opts)
+        props       (comp/props form-instance)
+        data        (get props ref-key)
+        can-add?    (?! (fo/can-add? subform-opts) form-instance ref-key)
         can-delete? (fo/can-delete? subform-opts)
-        add-id     (keyword "add" (str (namespace ref-key) "_" (name ref-key)))
-        computed   {:com.fulcrologic.rad.form/master-form     master-form
-                    :com.fulcrologic.rad.form/parent          form-instance
-                    :com.fulcrologic.rad.form/parent-relation ref-key}]
+        add-id      (keyword "add" (str (namespace ref-key) "_" (name ref-key)))
+        ;; The items live in their OWN container (id `items-id`) that EXCLUDES the trailing "+ Add"
+        ;; button, so `engine/focus-last-in!` lands on the newly-added item rather than on Add.
+        items-id    (keyword "items" (str (namespace ref-key) "_" (name ref-key)))
+        computed    {:com.fulcrologic.rad.form/master-form     master-form
+                     :com.fulcrologic.rad.form/parent          form-instance
+                     :com.fulcrologic.rad.form/parent-relation ref-key}
+        ;; Alt-j / Alt-k jump item-to-item within this subform's focus group, skipping inner fields.
+        group-nav   (fn [ev]
+                      (let [app  (comp/any->app form-instance)
+                            tree (engine/current-node-tree app)]
+                        (case (engine/key-chord ev)
+                          [:alt "j"] (do (engine/focus-next-in-group! app tree ref-key) :handled)
+                          [:alt "k"] (do (engine/focus-prev-in-group! app tree ref-key) :handled)
+                          nil)))]
     (when data
       (vbox {:border? true :color :bright-black :padding 1}
         (text {:bold true :color :yellow} (name ref-key))
         (if (vector? data)
           (let [factory (comp/computed-factory Sub {:keyfn #(comp/get-ident Sub %)})]
             (vbox {}
-              (mapv (fn [child]
-                      (let [del-id (keyword "del" (str (name ref-key) "_" (hash (comp/get-ident Sub child))))]
-                        (vbox {}
-                          (factory child computed)
-                          (when (?! can-delete? form-instance child)
-                            (button {:id del-id :color :red :highlight (e/focused? del-id)
-                                     :on-activate (fn [] (scform/delete-child! form-instance ref-key
-                                                           (comp/get-ident Sub child)))}
-                              " - Delete ")))))
-                data)
+              (vbox {:id items-id :on-key group-nav}
+                (mapv (fn [child]
+                        (let [del-id (keyword "del" (str (name ref-key) "_" (hash (comp/get-ident Sub child))))]
+                          (vbox {:focus-group ref-key}
+                            (factory child computed)
+                            (when (?! can-delete? form-instance child)
+                              (button {:id del-id :color :red :highlight (e/focused? del-id)
+                                       :on-activate (fn [] (scform/delete-child! form-instance ref-key
+                                                             (comp/get-ident Sub child)))}
+                                " - Delete ")))))
+                  data))
               (when can-add?
                 (button {:id add-id :color :green :highlight (e/focused? add-id)
-                         :on-activate (fn [] (scform/add-child! form-instance ref-key Sub))}
+                         :on-activate (fn []
+                                        (scform/add-child! form-instance ref-key Sub)
+                                        ;; Move focus to the just-appended item (its last field).
+                                        (let [app  (comp/any->app form-instance)
+                                              tree (engine/current-node-tree app)]
+                                          (engine/focus-last-in! app tree items-id)))}
                   " + Add "))))
           ((comp/computed-factory Sub) data computed))))))
 
