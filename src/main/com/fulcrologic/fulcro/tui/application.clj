@@ -277,6 +277,23 @@ page-scroll for a focused viewport."
             (engine/set-viewport-scroll! app vp-id next)
             :handled))))))
 
+(defn record-error!
+  "Records `t` as `app`'s most-recent input/render-loop error, in the runtime atom under `::last-error`
+   (with a monotonically increasing `::error-count`). This is how the loop tolerates an exception
+   WITHOUT killing the session or corrupting the terminal: the error is captured for later/sane
+   reporting (e.g. shown in-UI via `last-error`, or printed after the loop exits) instead of bubbling
+   out of the thread. Returns `app`."
+  [app t]
+  (swap! (runtime-atom-key app)
+    (fn [rt] (-> rt (assoc ::last-error t) (update ::error-count (fnil inc 0)))))
+  app)
+
+(defn last-error
+  "Returns the most recent `Throwable` recorded by the input/render loop for `app` (or `nil`).
+   `(get @(runtime-atom app) ::error-count)` holds how many have occurred. See `record-error!`."
+  [app]
+  (::last-error (runtime app)))
+
 (>defn render!
   "Paints `app` to its attached terminal. This is the driver's core render and is wired as the app's
 render hook so any state change repaints.
@@ -300,16 +317,12 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
       ;; terminal's resize handler fires on JLine's signal thread — both call `render!`, and they must
       ;; not interleave their writes to the terminal or the cached prev-buffer/placed-tree.
       (p `render! (locking terminal
-        (let [state-map      (some-> app state-atom-key deref)
-              root-class     (root-class-key rt)
-              query          (rc/get-query root-class state-map)
-              tree           (fdn/db->tree query state-map state-map)
-              ;; `engine/render-root` binds Fulcro's render-time dynamic vars (comp/*app* etc.)
-              ;; itself from the `app` arg; here we only need the TUI-specific focus var so
-              ;; `elements/focused?` resolves during the component renders.
-              full-tree      (p `render-root
-                               (binding [engine/*current-focus* (engine/current-focus app)]
-                                 (engine/render-root root-class tree app)))
+        (let [;; `engine/current-node-tree` computes the pure node tree from state (root class +
+              ;; `db->tree` + `render-root`, with the focus var bound) AND memoizes it in the runtime
+              ;; atom keyed on state-map identity. Sharing it with `process-key!` means a keystroke
+              ;; that only moves focus does not build the whole tree twice (once to resolve the focus
+              ;; ring, once to paint) — the second consumer reuses the first's tree.
+              full-tree      (p `render-root (engine/current-node-tree app))
               ;; Overlays (open `:modal` nodes) are composited on top of the base UI; the base is
               ;; laid out from the tree with all modals stripped, and the topmost overlay is placed
               ;; into its own screen window. Focus/cursor/scroll track the active layer.
@@ -334,13 +347,17 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
               last-size      (::last-size rt)
               size           {:rows rows :cols cols}
               resized?       (boolean (and last-size (not= last-size size)))
-              prev           (when-not resized? (::prev-buffer rt))
-              ;; On a resize the whole screen is repainted from scratch (`:clear?`): a plain full
-              ;; repaint only writes non-blank cells, so without clearing, stale content from the
-              ;; old size would linger on screen.
+              ;; A `redraw!` request (e.g. Ctrl-L) forces a clear + full repaint to recover a screen
+              ;; corrupted by stray output (a rogue log line, another process writing to the tty…).
+              force-redraw?  (boolean (::force-redraw? rt))
+              full-repaint?  (or resized? force-redraw?)
+              prev           (when-not full-repaint? (::prev-buffer rt))
+              ;; On a resize/forced redraw the whole screen is repainted from scratch (`:clear?`): a
+              ;; plain full repaint only writes non-blank cells, so without clearing, stale content
+              ;; (from the old size, or stray output) would linger on screen.
               ansi           (p `serialize
                                (engine/frame->ansi prev buf {:sync?  (term/t-sync-supported? terminal)
-                                                             :clear? resized?}))]
+                                                             :clear? full-repaint?}))]
           (p `write (term/t-write! terminal ansi))
           ;; Position the cursor AFTER the frame's drawing and flush once, so the cursor-move is
           ;; the last terminal command of the frame (otherwise the diff's writes leave the hardware
@@ -354,7 +371,8 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
           (swap! (runtime-atom-key app) assoc
             ::prev-buffer buf
             ::placed active-placed
-            ::last-size size)
+            ::last-size size
+            ::force-redraw? false)
           app))))))
 
 (>defn request-render!
@@ -399,13 +417,25 @@ after `quit!` closes the terminal cannot crash the daemon. Returns `app`."
                                    ;; render so a stale frame can never crash the daemon nor surface.
                                    (let [running? (some-> (runtime app) ::handle :running? deref)]
                                      (when (not (false? running?))
-                                       (try (render! app) (catch Throwable _ nil))))
-                                   (catch Throwable _
-                                     (reset! sched false))))
+                                       (try (render! app) (catch Throwable t (record-error! app t)))))
+                                   (catch Throwable t
+                                     (reset! sched false)
+                                     (record-error! app t))))
                   t            (Thread. ^Runnable runnable "fulcro-tui-render")]
               (.setDaemon t true)
               (.start t))))))
     app))
+
+(>defn redraw!
+  "Forces a full repaint of `app` on the next frame — clears the screen and repaints from scratch,
+   discarding the diff baseline — to recover a terminal corrupted by stray output (a rogue log line,
+   another process writing to the tty, etc.). Wire it to a chord such as Ctrl-L via `:global-keymap`:
+   `{[:ctrl \"l\"] (fn [app _] (redraw! app))}`. Returns `app`."
+  [app]
+  [any? => any?]
+  (swap! (runtime-atom-key app) assoc ::force-redraw? true)
+  (request-render! app)
+  app)
 
 ;; ============================================================================
 ;; Step (single deterministic iteration)
@@ -432,10 +462,15 @@ Dispatch order:
 The placed tree from the previous frame is used to locate the enclosing viewport for steps 1 & 2."
   [app key-event global-keymap]
   [any? map? (? map?) => any?]
-  (let [placed (placed-tree-of app)]
-    (when-not (and placed (viewport-scroll-key! app placed key-event))
-      (engine/process-key! app key-event global-keymap)
-      (follow-focus! app (or (placed-tree-of app) placed))))
+  ;; Batch this keystroke's renders: `focus!` and any transaction fired here would each trigger an
+  ;; immediate synchronous render, so a single arrow key (which moves focus AND then scrolls the
+  ;; viewport via `follow-focus!`) would paint twice. Suppress those eager renders; the caller
+  ;; (`step!`/the input loop) renders ONCE after dispatch returns.
+  (binding [engine/*suppress-render* true]
+    (let [placed (placed-tree-of app)]
+      (when-not (and placed (viewport-scroll-key! app placed key-event))
+        (engine/process-key! app key-event global-keymap)
+        (follow-focus! app (or (placed-tree-of app) placed)))))
   app)
 
 (>defn step!
@@ -506,9 +541,13 @@ size change (`t-on-resize!` → `render!`), sets initial focus to the first node
                      regardless of which node has focus; everything else goes through the
                      focus/input pipeline (`step!`). Defaults to the keymap registered on the
                      app at `application`/`start!` time (`::global-keymap`), if any.
-* `:on-error`      - optional `(fn [app throwable])` called if the input loop throws. The loop
-                     always also stashes the throwable on the handle's `:error` atom and leaves
-                     the terminal.
+* `:on-error`      - optional `(fn [app throwable])` called for an exception raised while handling a
+                     keystroke (a global-keymap handler, key dispatch, or a synchronous render). The
+                     loop TOLERATES these: it records the error (see `last-error`/`record-error!`),
+                     invokes `:on-error`, attempts a repaint, and KEEPS RUNNING — one bad keystroke
+                     does not end the session. (A throwable escaping the loop structure itself, e.g.
+                     from reading keys, still ends the loop, is stashed on the handle's `:error` atom,
+                     and leaves the terminal.)
 * `:max-fps`       - optional max live render frequency (frames/sec). When present and positive the
                      input loop and resize/render hooks coalesce repaints to at most one per
                      `(quot 1000 max-fps)` ms (trailing-edge debounce via `request-render!`). When
@@ -550,13 +589,22 @@ terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
                                ;; loop's request with the synchronous `:core-render!` hook that a
                                ;; transaction in `dispatch-key!` may also fire, killing the double
                                ;; render and capping live repaints at `:max-fps`.
-                               (if-let [h (and global-keymap (get global-keymap (engine/key-chord k)))]
-                                 (h app k)
-                                 (do
-                                   ;; nil global-keymap here mirrors the prior `(step! app k)` call;
-                                   ;; reserved chords are already handled by the branch above.
-                                   (dispatch-key! app k nil)
-                                   (request-render! app)))
+                               ;; Tolerate per-keystroke errors: a throwing handler / dispatch /
+                               ;; synchronous render must NOT kill the whole session. Record the
+                               ;; error (for sane reporting via `last-error`), hand it to `:on-error`
+                               ;; if supplied, attempt a repaint so the UI recovers, and keep looping.
+                               (try
+                                 (if-let [h (and global-keymap (get global-keymap (engine/key-chord k)))]
+                                   (h app k)
+                                   (do
+                                     ;; nil global-keymap here mirrors the prior `(step! app k)` call;
+                                     ;; reserved chords are already handled by the branch above.
+                                     (dispatch-key! app k nil)
+                                     (request-render! app)))
+                                 (catch Throwable t
+                                   (record-error! app t)
+                                   (when on-error (try (on-error app t) (catch Throwable _ nil)))
+                                   (try (request-render! app) (catch Throwable _ nil))))
                                (recur)))))
                        ;; C2: an uncaught exception must NOT silently kill the thread and make
                        ;; `run-blocking!`'s join look like a clean exit. Stash it on the handle's
@@ -665,7 +713,13 @@ Typically you will use `run-blocking!` to actually run the application."
               (rapp/fulcro-app
                 (merge
                   opts
-                  (cond-> {:core-render!      (fn [app _opts] (request-render! app))
+                  (cond-> {:core-render!      (fn [app _opts]
+                                                ;; While the driver is batching a keystroke's
+                                                ;; mutations (`engine/*suppress-render*`), a
+                                                ;; transaction's render is deferred to the single
+                                                ;; post-dispatch render so one key = one frame.
+                                                (when-not engine/*suppress-render*
+                                                  (request-render! app)))
                            :optimized-render! (fn [_app _opts] true)
                            :render-root!      (constantly true)}))))]
     ;; Default-on: initialize from the Root's declared :initial-state unless the caller

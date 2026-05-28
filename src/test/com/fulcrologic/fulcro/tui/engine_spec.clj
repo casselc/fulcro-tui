@@ -39,7 +39,7 @@
    :ident :m/id}
   [(elements/text {} "a") (elements/text {} "b")])
 
-(specification {:covers {`engine/node? "277a4d,ef6fa0"}} "node?"
+(specification {:covers {`engine/node? "863300"}} "node?"
   (assertions
     "is true for a node produced by a generator"
     (engine/node? (elements/vbox {})) => true
@@ -75,7 +75,7 @@
     "is zero for the empty string"
     (engine/string-width "") => 0))
 
-(specification {:covers {`engine/wrap-text "386083,ef97f4"}} "wrap-text"
+(specification {:covers {`engine/wrap-text "d41206,bbb898"}} "wrap-text"
   (component "short text fits on one line"
     (assertions
       "text narrower than the width is a single line"
@@ -123,7 +123,7 @@
       (engine/wrap-text "x y z" 0) => ["x y z"]
       (engine/wrap-text "a b\nc d" 0) => ["a b" "c d"])))
 
-(specification {:covers {`engine/wrapping-text? "e01c56,75544d"}} "wrapping-text?"
+(specification {:covers {`engine/wrapping-text? "e01c56,ccafd0"}} "wrapping-text?"
   (assertions
     "is true for a :text node with :wrap true"
     (engine/wrapping-text? (elements/text {:wrap true} "x")) => true
@@ -168,7 +168,7 @@
         (engine/screen (engine/render-buffer (assoc placed ::engine/scroll {:x 0 :y 2}) 3 9))
         => ["jumps    " "over the " "lazy dog "]))))
 
-(specification {:covers {`engine/intrinsic-size "df71b2,d7562d"}} "intrinsic-size"
+(specification {:covers {`engine/intrinsic-size "285e13,d2a4af"}} "intrinsic-size"
   (component "leaves"
     (assertions
       "text is as wide as its longest line and as tall as its line count"
@@ -297,7 +297,7 @@
     "adjusts both axes independently"
     (engine/scroll-to-show {:x 0 :y 0} {:x 5 :y 4 :w 1 :h 1} {:w 3 :h 3}) => {:x 3 :y 2}))
 
-(specification {:covers {`engine/viewport? "014fb0,75544d"}} "viewport?"
+(specification {:covers {`engine/viewport? "014fb0,ccafd0"}} "viewport?"
   (assertions
     "is true for a viewport node"
     (engine/viewport? (elements/viewport {})) => true
@@ -315,8 +315,8 @@
     "shrinks by the padding on every edge"
     (engine/content-view-size (engine/place (elements/viewport {:padding 1}) {:x 0 :y 0 :w 8 :h 4})) => {:w 6 :h 2}))
 
-(specification {:covers {`engine/placed-viewports       "ade25c,96f37e"
-                         `engine/focus-viewport-context "e6a13e,ca8114"}} "placed-viewports / focus-viewport-context"
+(specification {:covers {`engine/placed-viewports       "ade25c,203acc"
+                         `engine/focus-viewport-context "e6a13e,72aaa9"}} "placed-viewports / focus-viewport-context"
   (let [tree   (elements/vbox {:id "root"}
                  (elements/text {} "hdr")
                  (elements/viewport {:id :vp}
@@ -385,7 +385,7 @@
       (engine/put-cell b 9 9 \X {}) => b
       (engine/put-cell b -1 0 \X {}) => b)))
 
-(specification {:covers {`engine/put-str "d410fe,fc6db1"}} "put-str"
+(specification {:covers {`engine/put-str "aba056,b8f133"}} "put-str"
   (let [b    (engine/make-buffer 1 6)
         full {:x 0 :y 0 :w 6 :h 1}]
     (component "advancing and styling"
@@ -429,7 +429,7 @@
     "yields the reset sequence for an empty codes vector"
     (engine/sgr-string []) => "[0m"))
 
-(specification {:covers {`engine/render-buffer "e06fec,f835b1"
+(specification {:covers {`engine/render-buffer "e06fec,fce04b"
                          `engine/paint         "9cb0a6,dc3f9b"}} "render-buffer / paint"
   (component "stacked leaves"
     (let [tree (engine/place (elements/vbox {}
@@ -542,7 +542,7 @@
       "exposes the style of each cell"
       (mapv :sgr (first out)) => [{:fg :red} {}])))
 
-(specification {:covers {`engine/diff "7c8aea,3667e7"}} "diff"
+(specification {:covers {`engine/diff "5b944f,045a15"}} "diff"
   (let [b1 (engine/make-buffer 1 5)
         ab (engine/put-str b1 0 0 "abc" {} {:x 0 :y 0 :w 5 :h 1})]
     (component "unchanged buffers"
@@ -571,7 +571,7 @@
         "emits a full repaint when prev has different dimensions"
         (engine/diff (engine/make-buffer 2 5) ab) => [{:row 0 :col 0 :sgr [] :text "abc"}]))))
 
-(specification {:covers {`engine/ops->ansi "856e75,5e36b9"}} "ops->ansi"
+(specification {:covers {`engine/ops->ansi "e8b518,3649a3"}} "ops->ansi"
   (assertions
     "emits a cursor move (row+1;col+1) then an SGR then the text"
     (engine/ops->ansi [{:row 1 :col 2 :sgr [31] :text "hi"}]) => "[2;3H[31mhi[0m"
@@ -590,7 +590,7 @@
     "returns the empty string for no ops"
     (engine/ops->ansi []) => ""))
 
-(specification {:covers {`engine/frame->ansi "9eafc2,a5ab29"}} "frame->ansi"
+(specification {:covers {`engine/frame->ansi "9eafc2,3b7c6b"}} "frame->ansi"
   (let [b1  (engine/make-buffer 1 5)
         nxt (engine/put-str b1 0 0 "X" {} {:x 0 :y 0 :w 5 :h 1})]
     (assertions
@@ -599,7 +599,7 @@
       "does not wrap the diff when :sync? is false"
       (engine/frame->ansi b1 nxt {:sync? false}) => "[1;1HX")))
 
-(specification {:covers {`engine/frame->ansi "9eafc2,a5ab29"}} "frame->ansi — clear-screen on resize"
+(specification {:covers {`engine/frame->ansi "9eafc2,3b7c6b"}} "frame->ansi — clear-screen on resize"
   (let [b1  (engine/make-buffer 1 5)
         nxt (engine/put-str b1 0 0 "X" {} {:x 0 :y 0 :w 5 :h 1})]
     (assertions
@@ -644,7 +644,7 @@
       "calls the class :render, returning its node with props flowing in"
       (engine/render-instance instance) => (elements/button {:id "plain-3"} "Click"))))
 
-(specification {:covers {`engine/render-tree "2ad3f6,408f57"}} "render-tree"
+(specification {:covers {`engine/render-tree "004531,3fbfe0"}} "render-tree"
   (component "scalars and nil"
     (assertions
       "passes a string through unchanged"
@@ -677,13 +677,13 @@
         "a render returning a vector yields a vector of sibling nodes"
         tree => [(elements/text {} "a") (elements/text {} "b")]))))
 
-(specification {:covers {`engine/render-root "b79137,64eef5"}} "render-root"
+(specification {:covers {`engine/render-root "b79137,995877"}} "render-root"
   (let [tree (engine/render-root Plain {:p/id 5 :p/label "Root"})]
     (assertions
       "builds the root instance via factory and walks it to a pure node tree"
       tree => (elements/button {:id "plain-5"} "Root"))))
 
-(specification {:covers {`engine/node-attr "d53a76,75544d"}} "node-attr"
+(specification {:covers {`engine/node-attr "d53a76,ccafd0"}} "node-attr"
   (assertions
     "returns the value of an attribute on a node"
     (engine/node-attr (elements/text {:id "x" :color :red} "t") :color) => :red
@@ -692,7 +692,7 @@
     "returns nil for a non-node value"
     (engine/node-attr "not-a-node" :id) => nil))
 
-(specification {:covers {`engine/find-by-id "3fafe1,8ae121"}} "find-by-id"
+(specification {:covers {`engine/find-by-id "3fafe1,805ed0"}} "find-by-id"
   (let [tree (elements/vbox {:id "root"}
                (elements/text {:id "a"} "A")
                (elements/hbox {:id "mid"}
@@ -705,7 +705,7 @@
       "returns nil when no node has the id"
       (engine/find-by-id tree "nope") => nil)))
 
-(specification {:covers {`engine/node-text "752bdf,75544d"}} "node-text"
+(specification {:covers {`engine/node-text "752bdf,ccafd0"}} "node-text"
   (let [tree (elements/vbox {}
                (elements/text {} "Hello ")
                (elements/hbox {} (elements/text {} "wor") "ld"))]
@@ -717,7 +717,7 @@
       "stringifies a bare number"
       (engine/node-text 42) => "42")))
 
-(specification {:covers {`engine/activate! "99f954,8ae121"}} "activate!"
+(specification {:covers {`engine/activate! "99f954,805ed0"}} "activate!"
   (let [called (atom false)
         node   (elements/button {:id "go" :on-activate (fn [] (reset! called :yes))} "Go")]
     (assertions
@@ -728,7 +728,7 @@
       "returns nil when there is no handler"
       (engine/activate! (elements/button {} "x")) => nil)))
 
-(specification {:covers {`engine/press! "f6f187,8ae121"}} "press!"
+(specification {:covers {`engine/press! "f6f187,805ed0"}} "press!"
   (let [seen (atom nil)
         node (elements/box {:id "b" :on-key (fn [k] (reset! seen k))})]
     (assertions
@@ -739,7 +739,7 @@
       "returns nil when there is no handler"
       (engine/press! (elements/box {}) :x) => nil)))
 
-(specification {:covers {`engine/type! "e574a3,8ae121"}} "type!"
+(specification {:covers {`engine/type! "e574a3,805ed0"}} "type!"
   (let [typed (atom nil)
         node  (elements/input {:id "f" :value "" :on-change (fn [s] (reset! typed s))})]
     (assertions
@@ -754,7 +754,7 @@
 ;; Focus, input & key dispatch
 ;; ===========================================================================
 
-(specification {:covers {`engine/wrap-layout "f43751,6d2e82"}} "wrap-layout"
+(specification {:covers {`engine/wrap-layout "3bcd5a,7d5d7b"}} "wrap-layout"
   (assertions
     "records each wrapped row's text, start caret index, and consumed length"
     (engine/wrap-layout "the quick brown fox" 9)
@@ -771,8 +771,8 @@
     "puts a trailing newline's empty line after the content"
     (engine/wrap-layout "ab\n" 9) => [{:start 0 :len 2 :text "ab"} {:start 3 :len 0 :text ""}]))
 
-(specification {:covers {`engine/caret->rowcol "17bca2,ee2367"
-                         `engine/rowcol->caret "2b265f,ee2367"}} "caret <-> rowcol"
+(specification {:covers {`engine/caret->rowcol "17bca2,5ccf39"
+                         `engine/rowcol->caret "2b265f,5ccf39"}} "caret <-> rowcol"
   (let [v "the quick brown fox"]                            ; wraps at 9 to ["the quick" "brown fox"]
     (component "caret->rowcol"
       (assertions
@@ -811,7 +811,7 @@
                             (if (= c 9) 9 c))))
           (range 0 (inc (count v)))) => true))))
 
-(specification {:covers {`engine/text-scroll-top "8d98bb,01b510"}} "text-scroll-top"
+(specification {:covers {`engine/text-scroll-top "8d98bb,f91646"}} "text-scroll-top"
   (let [v "the quick brown fox jumps"]                      ; wraps at 9 to 3 rows (row 2 = "jumps")
     (assertions
       "no scroll when the caret row already fits within the window height"
@@ -823,7 +823,7 @@
       "no scroll when the caret is on the first row regardless of height"
       (engine/text-scroll-top v 9 0 1) => 0)))
 
-(specification {:covers {`engine/multiline-input? "6f29cd,8ae121"}} "multiline-input?"
+(specification {:covers {`engine/multiline-input? "6f29cd,805ed0"}} "multiline-input?"
   (assertions
     "is true for an :input with :multiline? true"
     (engine/multiline-input? (elements/input {:id :n :multiline? true :value ""})) => true
@@ -834,7 +834,7 @@
     "is false for a non-node"
     (engine/multiline-input? "x") => false))
 
-(specification {:covers {`engine/apply-edit-multiline "836f68,1a11ff"}} "apply-edit-multiline"
+(specification {:covers {`engine/apply-edit-multiline "836f68,42f063"}} "apply-edit-multiline"
   (let [v "the quick brown fox"]                            ; wraps at 9 to ["the quick" "brown fox"]
     (component "Enter inserts a newline (does not submit)"
       (assertions
@@ -889,7 +889,7 @@
       "set-input-width! records the width for that input id"
       (engine/input-width app :notes 999) => 20)))
 
-(specification {:covers {`engine/handle-input-key! "11ab98,ac6054"}} "handle-input-key! (single-line vs multiline)"
+(specification {:covers {`engine/handle-input-key! "c846c3,8e9eb8"}} "handle-input-key! (single-line vs multiline)"
   (component "single-line input: Enter submits, other keys edit"
     (let [submitted (atom nil)
           changed   (atom nil)
@@ -984,7 +984,7 @@
       "clamps a negative caret to the start before inserting"
       (engine/apply-edit "ab" -5 {:key "X" :char "X"}) => {:value "Xab" :caret 1})))
 
-(specification {:covers {`engine/focusable-node? "578cb2,8ae121"}} "focusable-node?"
+(specification {:covers {`engine/focusable-node? "578cb2,805ed0"}} "focusable-node?"
   (assertions
     "is true for an :input with an :id"
     (engine/focusable-node? (elements/input {:id "i" :value ""})) => true
@@ -1001,8 +1001,8 @@
     "is false for a non-node value"
     (engine/focusable-node? "not-a-node") => false))
 
-(specification {:covers {`engine/focusables  "af1f15,f9541e"
-                         `engine/focus-order "ce7895,60de49"
+(specification {:covers {`engine/focusables  "87a81b,f5fa35"
+                         `engine/focus-order "ce7895,e77204"
                          `engine/next-focus  "59e3a5,dbaa57"
                          `engine/prev-focus  "b15d77,dbaa57"}} "focus ring"
   (let [tree (elements/vbox {:id "root"}
@@ -1041,7 +1041,7 @@
           "next-focus returns the first id when current is nil"
           (engine/next-focus order nil) => "b")))))
 
-(specification {:covers {`engine/apply-focus-change! "14481f,804804"}} "apply-focus-change!"
+(specification {:covers {`engine/apply-focus-change! "14481f,ecc530"}} "apply-focus-change!"
   (let [evts (atom [])
         tree (elements/vbox {:id "root"}
                (elements/button {:id "a" :on-lost-focus (fn [id] (swap! evts conj [:lost id]))} "A")
@@ -1070,7 +1070,7 @@
     "lists modifiers in :ctrl :alt :shift order before the base key"
     (engine/key-chord {:key "x" :char "x" :ctrl? true :alt? true :shift? true}) => [:ctrl :alt :shift "x"]))
 
-(specification {:covers {`engine/route-key "d7b983,806419"}} "route-key"
+(specification {:covers {`engine/route-key "98eea3,72271d"}} "route-key"
   (component "focused handler fires"
     (let [fired (atom [])
           tree  (elements/vbox {:id "root"}
@@ -1169,7 +1169,7 @@
     app))
 
 (specification {:covers {`engine/current-focus "8b7584"
-                         `engine/focus!        "f79a95"}} "current-focus / focus!"
+                         `engine/focus!        "efb19d,dc1929"}} "current-focus / focus!"
   (let [app (build-driver-app)]
     (engine/focus! app "name")
     (assertions
@@ -1180,7 +1180,7 @@
       "current-focus also reads from a bare state-map"
       (engine/current-focus {::engine/focus "name"}) => "name")))
 
-(specification {:covers {`engine/process-key! "a34332,a99726"}} "process-key!"
+(specification {:covers {`engine/process-key! "e4ad3e,214cf9"}} "process-key!"
   (component "Enter or Space activates a focused button"
     (let [app (build-driver-app)
           sa  (:com.fulcrologic.fulcro.application/state-atom app)]
@@ -1292,7 +1292,7 @@
 ;; Overlays: modal node, pure helpers, layout/paint, and picker
 ;; ---------------------------------------------------------------------------
 
-(specification {:covers {`engine/modal-node? "01af9e,75544d"}} "modal-node?"
+(specification {:covers {`engine/modal-node? "01af9e,ccafd0"}} "modal-node?"
   (assertions
     "is true for a :modal node"
     (engine/modal-node? (elements/modal {:id :d})) => true
@@ -1309,7 +1309,7 @@
              (elements/modal {:id :closed :open? false} (elements/button {:id :c} "C"))
              (elements/modal {:id :open-2 :open? true} (elements/button {:id :o2} "O2")))]
 
-  (specification {:covers {`engine/collect-overlays "a78c8f,2a7273"}} "collect-overlays"
+  (specification {:covers {`engine/collect-overlays "a78c8f,9d7259"}} "collect-overlays"
     (assertions
       "returns only the OPEN modal nodes (closed ones omitted)"
       (mapv #(engine/node-attr % :id) (engine/collect-overlays tree)) => [:open-1 :open-2]
@@ -1318,7 +1318,7 @@
       "returns an empty vector when there are no open modals"
       (engine/collect-overlays (elements/vbox {} (elements/button {:id :b} "x"))) => []))
 
-  (specification {:covers {`engine/strip-overlays "5c4c5b,c25b8c"}} "strip-overlays"
+  (specification {:covers {`engine/strip-overlays "5c4c5b,a57083"}} "strip-overlays"
     (let [stripped (engine/strip-overlays tree)]
       (assertions
         "removes every :modal child (open or closed), keeping the rest"
@@ -1326,7 +1326,7 @@
         "leaves no modal contents focusable in the base tree"
         (mapv :id (engine/focusables stripped)) => [:base])))
 
-  (specification {:covers {`engine/active-tree "976472,93d1d8"}} "active-tree"
+  (specification {:covers {`engine/active-tree "976472,40d11e"}} "active-tree"
     (assertions
       "returns the topmost OPEN modal as the focus-trap subtree"
       (engine/node-attr (engine/active-tree tree) :id) => :open-2
@@ -1340,7 +1340,7 @@
                                           (elements/button {:id :hidden} "H"))))))
       => [:base])))
 
-(specification {:covers {`engine/overlay-window-rect "1c450f,2e15d4"}} "overlay-window-rect"
+(specification {:covers {`engine/overlay-window-rect "1c450f,def90e"}} "overlay-window-rect"
   (assertions
     "centers a fixed-size window within the screen by default"
     (engine/overlay-window-rect (elements/modal {:id :d :width 10 :height 4}) {:x 0 :y 0 :w 20 :h 8})

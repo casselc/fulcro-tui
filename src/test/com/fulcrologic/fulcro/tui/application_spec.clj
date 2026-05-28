@@ -83,9 +83,9 @@
 
 ;; ---------------------------------------------------------------------------
 
-(specification {:covers {`app/application      "06713e,452305"
-                         `app/attach!          "d47881,3c1a9f"
-                         `app/render!          "971320,b78264"
+(specification {:covers {`app/application      "0c544b,37f2e8"
+                         `app/attach!          "d47881,39e44a"
+                         `app/render!          "cbdc13,d94a07"
                          `app/screen-of        "0ca459,662c58"
                          `app/screen-styled-of "3815eb,5083b1"
                          `app/terminal         "18f70c,089ec1"}} "application / attach! (initial paint)"
@@ -111,7 +111,7 @@
         "the hardware cursor is shown at input :a's caret origin (0,0)"
         (term/cursor t) => {:x 0 :y 0 :visible? true}))))
 
-(specification {:covers {`app/step! "6b509b,85f1d7"}} "step! — focus, typing, and activation"
+(specification {:covers {`app/step! "6b509b,415611"}} "step! — focus, typing, and activation"
   (component "Tab moves focus and follows the cursor to the newly focused input"
     (let [app (new-app)
           t   (term/string-terminal {:rows 10 :cols 30})]
@@ -155,8 +155,8 @@
         "the repaint shows the button's updated label"
         (nth (app/screen-of app) 2) => "DONE                          "))))
 
-(specification {:covers {`app/render!          "971320,b78264"
-                         `app/too-small-buffer "6bd38f,3595f6"}} "render! — diff path & resize"
+(specification {:covers {`app/render!          "cbdc13,d94a07"
+                         `app/too-small-buffer "6bd38f,3e293f"}} "render! — diff path & resize"
   (component "a no-op re-render produces no terminal output"
     (let [app (new-app)
           t   (term/string-terminal {:rows 10 :cols 30})]
@@ -197,7 +197,7 @@
           (str/includes? (first scr) "too small") => true
           (str/includes? (first scr) "10x5") => true)))))
 
-(specification {:covers {`app/step!         "6b509b,85f1d7"
+(specification {:covers {`app/step!         "6b509b,415611"
                          `app/follow-focus! "f2b69d,09b8da"}} "viewport scrolling, follow-focus, and cursor tracking"
   (component "Tab into the list auto-scrolls the viewport so the focused item stays visible"
     (let [app (new-vp-app)
@@ -326,8 +326,8 @@
         "scrolling back up reveals the first wrapped row again"
         (first (app/screen-of app)) => "the quick   "))))
 
-(specification {:covers {`app/mount!        "ed423c,4515ad"
-                         `app/run-blocking! "a55d6c,315f6c"
+(specification {:covers {`app/mount!        "d07a03,ea9daf"
+                         `app/run-blocking! "ecfe25,d0ae2d"
                          `app/quit!         "aa6cd2,a354d9"}} "mount! / run! — input loop"
   (component "run! with a finite key script processes the keys and ends, leaving the terminal"
     (let [app (new-app)
@@ -400,8 +400,8 @@
 (defn- new-picker-app []
   (app/application {:root-class PickerRoot :initial-state true}))
 
-(specification {:covers {`app/render! "971320,b78264"
-                         `app/step!   "6b509b,85f1d7"}} "overlay compositing & focus trap"
+(specification {:covers {`app/render! "cbdc13,d94a07"
+                         `app/step!   "6b509b,415611"}} "overlay compositing & focus trap"
   (component "while the picker is closed only the base UI is focusable and painted"
     (let [app (new-picker-app)
           t   (term/string-terminal {:rows 10 :cols 24})]
@@ -452,7 +452,7 @@
           "the base UI paints un-obscured again (no modal border on screen)"
           (str/includes? (apply str scr) "Fruit") => false)))))
 
-(specification {:covers {`app/step!         "6b509b,85f1d7"
+(specification {:covers {`app/step!         "6b509b,415611"
                          `app/follow-focus! "f2b69d,09b8da"}} "picker scrolling and selection"
   (component "arrowing down past the visible rows auto-scrolls the picker's viewport"
     (let [app (new-picker-app)
@@ -491,7 +491,7 @@
 ;; Entrypoint niceties: start!, app-level global-keymap, lifecycle (C1/C2).
 ;; ---------------------------------------------------------------------------
 
-(specification {:covers {`app/start! "f91686,043084"}} "start! — build + run in one call"
+(specification {:covers {`app/start! "f91686,7908e0"}} "start! — build + run in one call"
   (component "start! builds the app (application) and runs it to completion (run-blocking!)"
     (let [t      (term/string-terminal {:rows 10 :cols 30
                                         :keys [{:key "H" :char "H"}
@@ -520,21 +520,41 @@
               "after quit!, a resize produces no further output (handler was cleared)"
               (count (term/output t)) => post-quit))))))
 
-  (component "an exception in the input loop is caught, stashed on the handle :error, and passed to :on-error (C2)"
+  (component "redraw! forces a full clear+repaint to recover a corrupted screen"
+    (let [app (new-app)
+          t   (term/string-terminal {:rows 8 :cols 24})]
+      (app/attach! app t)                                   ; initial render
+      (let [before (count (term/output t))]
+        (app/redraw! app)
+        (let [new-out (subs (term/output t) before)]
+          (assertions
+            "redraw! emits another frame (a repaint occurred)"
+            (pos? (count new-out)) => true
+            "that frame cleared the screen (full repaint, not a diff)"
+            (str/includes? new-out "2J") => true
+            "the force-redraw flag is consumed after the frame"
+            (get @(:com.fulcrologic.fulcro.application/runtime-atom app)
+              :com.fulcrologic.fulcro.tui.application/force-redraw?) => false)))))
+
+  (component "an exception while handling a keystroke is TOLERATED: recorded, passed to :on-error, loop keeps running (C2)"
     (let [app    (new-app)
-          seen   (atom nil)
+          calls  (atom 0)
           boom   (ex-info "boom" {})
+          ;; Two throwing keystrokes: if the loop survives the first it will handle the second too.
           t      (term/string-terminal {:rows 10 :cols 30
-                                        :keys [{:key "q" :char "q" :ctrl? true}]})
+                                        :keys [{:key "q" :char "q" :ctrl? true}
+                                               {:key "q" :char "q" :ctrl? true}]})
           handle (app/run-blocking! app {:terminal      t
                                          :global-keymap {[:ctrl "q"] (fn [_a _e] (throw boom))}
-                                         :on-error      (fn [_app th] (reset! seen th))})]
+                                         :on-error      (fn [_app _th] (swap! calls inc))})]
       (assertions
-        "the throwable is stashed on the handle's :error atom"
-        (deref (:error handle)) => boom
-        ":on-error receives the throwable"
-        @seen => boom
-        "the terminal is still left despite the error"
+        ":on-error fired for BOTH throwing keystrokes — the loop survived the first and kept running"
+        @calls => 2
+        "the most recent error is recorded for sane reporting (last-error), rather than being fatal"
+        (app/last-error app) => boom
+        "the handle's :error atom stays nil — a handler exception no longer kills the loop"
+        (deref (:error handle)) => nil
+        "the terminal is still left when the loop ends (EOF)"
         (:left? @(.-state t)) => true)))
 
   (component "a :global-keymap registered at application time is used when run-blocking! is given none"
@@ -551,7 +571,7 @@
         "the loop stopped and left the terminal"
         (:left? @(.-state t)) => true))))
 
-(specification {:covers {`app/request-render! "efc530,f2264c"}} "request-render! — throttle + coalescing"
+(specification {:covers {`app/request-render! "92aa4b,758bf7"}} "request-render! — throttle + coalescing"
   (let [runtime-key :com.fulcrologic.fulcro.application/runtime-atom]
     (component "throttling disabled (default) renders synchronously, one render per request"
       (let [app    (new-app)

@@ -57,19 +57,47 @@
                            line-items)}
     addl))
 
+(def ^:private customers
+  "The demo customer roster: `[name email]` pairs. The `name` doubles as the account tempid."
+  [["Alice" "alice@example.com"]
+   ["Bob" "bob@example.com"]
+   ["Carol" "carol@example.com"]
+   ["Dave" "dave@example.com"]
+   ["Erin" "erin@example.com"]
+   ["Frank" "frank@example.com"]
+   ["Grace" "grace@example.com"]
+   ["Heidi" "heidi@example.com"]])
+
+(def ^:private product-catalog
+  "The demo product roster: `[description unit-price]` pairs drawn from when generating line items."
+  [["Widget" 9.99M] ["Gadget" 19.95M] ["Sprocket" 2.50M] ["Cog" 1.25M]
+   ["Bearing" 7.00M] ["Flange" 12.40M] ["Grommet" 0.85M] ["Bracket" 4.75M]
+   ["Washer" 0.35M] ["Bolt" 0.60M] ["Hinge" 3.20M] ["Pulley" 14.50M]])
+
+(defn- generated-invoice
+  "Builds invoice number `i` (1-based) deterministically: it cycles through `customers`, picks a date
+   spread across 2025, and carries 1-3 line items drawn from `product-catalog`. Line-item tempids are
+   made unique per invoice (`li-<i>-<j>`) so they never collide across invoices in one transaction."
+  [i]
+  (let [customer   (first (nth customers (mod i (count customers))))
+        month      (inc (mod i 12))
+        day        (inc (mod (* i 7) 27))
+        date-str   (format "2025-%02d-%02d" month day)
+        line-count (inc (mod i 3))
+        items      (mapv (fn [j]
+                           (let [[desc price] (nth product-catalog (mod (+ i (* 3 j)) (count product-catalog)))
+                                 qty           (inc (mod (+ i j) 5))]
+                             (new-line-item desc qty price :db/id (str "li-" i "-" j))))
+                     (range line-count))]
+    (new-invoice (str "invoice-" i) date-str customer items)))
+
 (defn seed-txn
-  "Returns the seed transaction: 2 accounts and 3 invoices with 1-2 line items each."
+  "Returns the seed transaction: the full `customers` roster plus 100 generated invoices (1-3 line
+   items each) — enough volume to exercise report pagination and viewport scrolling."
   []
-  [(new-account "Alice" "alice@example.com")
-   (new-account "Bob" "bob@example.com")
-   (new-invoice "invoice-1" "2026-01-15" "Alice"
-     [(new-line-item "Widget" 3 9.99M)
-      (new-line-item "Gadget" 1 19.95M)])
-   (new-invoice "invoice-2" "2026-02-20" "Bob"
-     [(new-line-item "Sprocket" 5 2.50M)])
-   (new-invoice "invoice-3" "2026-03-05" "Alice"
-     [(new-line-item "Cog" 10 1.25M)
-      (new-line-item "Bearing" 4 7.00M)])])
+  (into (mapv (fn [[name email]] (new-account name email)) customers)
+    (map generated-invoice)
+    (range 1 101)))
 
 (defn fresh-conn
   "Creates a fresh Datascript connection with the demo schema and seeds it.

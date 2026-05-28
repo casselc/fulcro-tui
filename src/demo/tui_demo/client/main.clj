@@ -29,7 +29,10 @@
   (let [app (tui-app/application
               {:root-class    root/Root
                :remotes       {:remote (remote/transit-remote base-url)}
-               :global-keymap {[:ctrl "q"] (fn [a _] (tui-app/quit! a))}})]
+               :global-keymap {[:ctrl "q"] (fn [a _] (tui-app/quit! a))
+                               ;; Force a full clean repaint — recovers the screen if stray output
+                               ;; (e.g. a log line) corrupts it.
+                               [:ctrl "l"] (fn [a _] (tui-app/redraw! a))}})]
     (rad-app/install-ui-controls! app tui-plugin/all-controls)
     (routing/install! app)
     ;; Preload the account list so the invoice form's customer pick-one has options to cycle.

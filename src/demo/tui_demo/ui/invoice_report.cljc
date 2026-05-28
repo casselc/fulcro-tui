@@ -26,5 +26,7 @@
                                   :label  "New Invoice"
                                   :action (fn [report-instance] (form/create! report-instance InvoiceForm))}}
    ro/control-layout      {:action-buttons [::new]}
+   ro/paginate?           true
+   ro/page-size           40
    ro/run-on-mount?       true
    ro/route               "invoices"})

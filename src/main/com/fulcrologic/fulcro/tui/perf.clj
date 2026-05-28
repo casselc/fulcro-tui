@@ -159,6 +159,33 @@
     (nth sorted (min (dec (count sorted)) (long (* q (count sorted)))))
     0))
 
+(def ^:private id-col-width
+  "Display width of the report's `id` column (matches the `%-34s` format below)."
+  34)
+
+(defn- abbreviate-id
+  "Returns the profiling-point id string `s` shortened Clojure-stacktrace style so it fits the report's
+   id column. Every dotted segment of the NAMESPACE except the last is collapsed to its first
+   character; the last namespace segment and the name are kept in full. A leading `:` (keyword) is
+   preserved; an id with no namespace is returned unchanged. As a final guard, an id still wider than
+   the column is clipped from the FRONT (keeping the most-specific tail) behind a leading `…`.
+
+   E.g. `:com.fulcrologic.fulcro.tui.engine/render-tree` -> `:c.f.f.t.engine/render-tree`."
+  [s]
+  (let [kw?    (str/starts-with? s ":")
+        body   (cond-> s kw? (subs 1))
+        slash  (str/index-of body "/")
+        short  (if (and slash (str/index-of (subs body 0 slash) "."))
+                 (let [nm   (subs body (inc slash))
+                       segs (str/split (subs body 0 slash) #"\.")
+                       abbr (conj (mapv #(subs % 0 1) (butlast segs)) (last segs))]
+                   (str (str/join "." abbr) "/" nm))
+                 body)
+        out    (cond->> short kw? (str ":"))]
+    (if (> (count out) id-col-width)
+      (str "…" (subs out (- (count out) (dec id-col-width))))
+      out)))
+
 (defn- us
   "Formats nanoseconds `ns` as a microsecond string with one decimal."
   [ns]
@@ -182,13 +209,13 @@
                              :p50 (pctl srt 0.50) :p90 (pctl srt 0.90) :p99 (pctl srt 0.99)
                              :pct (if (pos? sum-self) (* 100.0 (/ (double self) sum-self)) 0.0)})))
                    (sort-by :self >))
-        header   (format "%-34s %7s %8s %7s %9s %9s %9s %9s %9s %10s"
+        header   (format "%-34.34s %7s %8s %7s %9s %9s %9s %9s %9s %10s"
                    "id" "nCalls" "self%" "self(ms)" "mean(µs)" "p50(µs)" "p90(µs)" "p99(µs)"
                    "max(µs)" "total(ms)")
         line     (apply str (repeat (count header) \-))
         body     (for [{:keys [id n total self mn mx p50 p90 p99 pct]} rows]
-                   (format "%-34s %7d %7.1f %8s %9s %9s %9s %9s %9s %10s"
-                     (str id) n pct (ms self)
+                   (format "%-34.34s %7d %7.1f %8s %9s %9s %9s %9s %9s %10s"
+                     (abbreviate-id (str id)) n pct (ms self)
                      (us (/ (double self) (max 1 n))) (us p50) (us p90) (us p99) (us mx) (ms total)))]
     (str/join "\n"
       (concat [header line] body

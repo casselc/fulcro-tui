@@ -8,14 +8,24 @@
     [com.fulcrologic.rad.form-options :as fo]
     [com.fulcrologic.rad.picker-options :as po]
     [com.fulcrologic.rad.statechart.form :refer [defsc-form]]
+    [com.fulcrologic.rad.statechart.form-options :as sfo]
     [com.fulcrologic.rad.type-support.decimal :as math]
+    [com.fulcrologic.statecharts.integration.fulcro.routing :as scr]
     [tui-demo.model.invoice :as invoice]
     [tui-demo.ui.line-item-form :refer [LineItemForm]]))
+
+(def report-route
+  "Registry keyword of the invoice report (used as a route target without a require cycle)."
+  :tui-demo.ui.invoice-report/InvoiceReport)
 
 (defsc-form InvoiceForm [this props]
   {fo/id            invoice/id
    fo/title         (fn [_ {:invoice/keys [id]}]
                       (if (tempid/tempid? id) "New Invoice" "Edit Invoice"))
+   ;; On cancel/save, route back to the report. (Default cancel-route is :back, which uses URL
+   ;; history — the TUI has no history provider, so we name the target explicitly. A registry
+   ;; keyword avoids a require cycle with the report ns.)
+   fo/cancel-route  report-route
    fo/attributes    [invoice/customer invoice/date invoice/line-items invoice/total]
    fo/field-styles  {:invoice/customer :pick-one}
    fo/field-options {:invoice/customer
@@ -31,9 +41,14 @@
    fo/layout        [[:invoice/customer :invoice/date]
                      [:invoice/line-items]
                      [:invoice/total]]
-   fo/triggers      {:derive-fields
+   sfo/triggers     {:derive-fields
                      (fn [{:invoice/keys [line-items] :as invoice}]
                        (assoc invoice
                          :invoice/total (reduce (fn [acc {:line-item/keys [subtotal]}]
                                                   (math/+ acc (or subtotal (math/zero))))
-                                          (math/zero) line-items)))}})
+                                          (math/zero) line-items)))
+                     ;; After a successful save, return to the report (on-saved doesn't navigate).
+                     :saved
+                     (fn [{:fulcro/keys [app]} _data _form-ident]
+                       (scr/route-to! app report-route {})
+                       nil)}})

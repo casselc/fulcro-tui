@@ -10,6 +10,7 @@
    activation to the control's `:action`/`:onChange` and `control/set-parameter!`."
   (:require
     [clojure.string :as str]
+    [com.fulcrologic.fulcro.algorithms.lambda :as lambda]
     [com.fulcrologic.fulcro.components :as comp]
     [com.fulcrologic.fulcro.mutations :as m]
     [com.fulcrologic.fulcro.raw.application :as rapp]
@@ -151,8 +152,9 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn render-button-control
-  "Renders a `:button` control as a fulcro-tui `button`. Activation invokes the control's `:action`
-   with the owning `instance` and `control-key`."
+  "Renders a `:button` control as a fulcro-tui `button`. Activation invokes the control's `:action`.
+   The action is called arity-tolerantly: RAD control actions are usually `(fn [this] …)` (1-arg), but
+   some take `[this control-key]`, so we adapt rather than always passing 2 args."
   [{:keys [instance control-key control]}]
   (let [{:keys [label action disabled? visible?]} control
         label    (?! label instance)
@@ -163,7 +165,7 @@
                :bold        true
                :highlight   (e/focused? (keyword "control" (name control-key)))
                :on-activate (fn [] (when (and action (not (?! disabled? instance)))
-                                     (action instance control-key)))}
+                                     ((lambda/->arity-tolerant action) instance control-key)))}
         (str " " (or label (name control-key)) " ")))))
 
 (defn render-string-control

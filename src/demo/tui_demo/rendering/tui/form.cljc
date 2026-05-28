@@ -11,7 +11,7 @@
    are unchanged. Requiring this ns installs the defmethods (the plugin requires it for side effects)."
   (:require
     [com.fulcrologic.fulcro.components :as comp]
-    [com.fulcrologic.fulcro.tui.elements :as e :refer [vbox hbox box text button line]]
+    [com.fulcrologic.fulcro.tui.elements :as e :refer [vbox hbox box text button line viewport]]
     [com.fulcrologic.rad.attributes-options :as ao]
     [com.fulcrologic.rad.form :as form]
     [com.fulcrologic.rad.form-options :as fo]
@@ -102,15 +102,30 @@
         nested? (not= master-form form-instance)
         title   (?! (fo/title options) form-instance (comp/props form-instance))]
     (if nested?
-      ;; A nested subform: just its body, no title/action-buttons (the master owns those).
+      ;; A nested subform: just its body, no title/action-buttons (the master owns those). It scrolls
+      ;; as part of the master form's body viewport, so it needs no viewport of its own.
       (box {:border? true :color :bright-black :padding 1}
         (scform/render-element env :form-body-container))
-      (vbox {:border? true :color :cyan :padding 1}
+      ;; `:grow 1` lets the master form fill the vertical space the root frame hands it. The title and
+      ;; the control section stay pinned at the top; only the body — wrapped in a growing viewport —
+      ;; scrolls, so a tall form (many fields / line items) never falls off the screen, and the
+      ;; Save/Undo/Cancel controls remain visible while scrolling. Tabbing between fields autoscrolls
+      ;; the viewport to keep the focused field visible.
+      (vbox {:border? true :color :cyan :padding 1 :grow 1}
         (text {:bold true :color :bright-cyan} (str (or title "Form")))
         (line {})
-        (scform/render-element env :form-body-container)
+        (scform/render-element env :form-controls)
         (line {})
-        (action-buttons env)))))
+        (viewport {:id :form-body :grow 1}
+          (scform/render-element env :form-body-container))))))
+
+;; The pinned control section at the top of the (master) form. It currently holds the
+;; Save/Undo/Cancel action buttons, but is a distinct element so additional always-visible
+;; controls (status, validation summary, custom buttons) can be added here without touching
+;; the scrolling body.
+(defmethod scform/render-element [:form-controls :default]
+  [env _element]
+  (action-buttons env))
 
 (defmethod scform/render-element [:form-body-container :default]
   [env _element]

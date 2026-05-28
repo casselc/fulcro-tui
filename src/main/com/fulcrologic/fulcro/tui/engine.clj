@@ -636,6 +636,16 @@ sequence `\"\\u001b[0m\"`."
     (:bg attrs) (assoc :bg (:bg attrs))
     (:bold attrs) (assoc :bold? true)))
 
+(>defn needs-bg-fill?
+  "Returns true if a container styled with `style` must fill its area with spaces. Only a background
+(`:bg`) or reverse-video (`:reverse?`) style changes how a *blank* cell looks; a foreground- or
+bold-only style does not (a space paints no glyph, so its fg/bold is invisible). Skipping the fill
+for fg/bold-only containers avoids an O(area) per-cell write — a large saving for big containers
+(e.g. a `:grow` viewport or frame tinted with a `:color`)."
+  [style]
+  [::style => boolean?]
+  (boolean (or (:bg style) (:reverse? style))))
+
 (>defn rect-intersection
   "Returns the rectangle that is the intersection of rects `a` and `b`. When they do not overlap the
 result has zero (or negative-clamped) width/height."
@@ -722,6 +732,23 @@ rect). Cells read from outside `src`'s bounds are skipped. Pure."
       dest
       (range 0 h))))
 
+(>defn- translate-placed
+  "Returns placed `node` with `(dx,dy)` added to its own `::rect` and recursively to every descendant's
+— EXCEPT it does not descend into a nested `:viewport`'s virtual content (that subtree lives in the
+nested viewport's own coordinate space and is repainted when that viewport paints; only the nested
+viewport's outer rect shifts). Used to paint just a viewport's visible window: the content is shifted
+by `-scroll` so the visible region lands at the window buffer's origin."
+  [node dx dy]
+  [any? int? int? => any?]
+  (if (node? node)
+    (let [r    (::rect node)
+          node (if r (assoc node ::rect (-> r (update :x + dx) (update :y + dy))) node)]
+      (if (= :viewport (::tag node))
+        node
+        (update node ::children
+          (fn [cs] (mapv (fn [c] (if (node? c) (translate-placed c dx dy) c)) cs)))))
+    node))
+
 (defmulti paint
   "Returns `buffer` after painting placed `node` (and its descendants) into it, clipping all writes to
 `clip`. Dispatches on `::tag`. Uses the painter's algorithm: a node paints itself (border/background
@@ -757,76 +784,85 @@ for an unregistered custom tag — it must NOT re-enter `paint`."
         node-clip    (rect-intersection clip rect)
         cr           (content-rect node)
         content-clip (rect-intersection node-clip cr)]
-    (case tag
-      (:text :button)
-      (let [lines (if (wrapping-text? node)
-                    (wrap-text (text-content node) (:w cr))
-                    (str/split (text-content node) #"\n" -1))]
-        (reduce
-          (fn [b [i line]]
-            (put-str b (:x cr) (+ (:y cr) i) line style content-clip))
-          buffer
-          (map-indexed vector lines)))
-
-      :input
-      (if (multiline-input? node)
-        ;; A multiline input renders its value wrapped to its content width, scrolled vertically by
-        ;; the internal top-line offset (`::text-scroll`, injected by the driver to keep the caret
-        ;; visible). Each visible visual row is painted into its rect row (clipped).
-        (let [top    (max 0 (long (or (::text-scroll node) 0)))
-              lines  (mapv :text (wrap-layout (str (:value attrs "")) (:w cr)))
-              window (subvec lines (min top (count lines)) (min (+ top (:h cr)) (count lines)))]
+    (if (or (<= (:w node-clip) 0) (<= (:h node-clip) 0))
+      ;; Cull: the node's rect lies entirely outside the current clip, so neither it nor any of its
+      ;; descendants can paint a visible cell — skip the whole subtree instead of walking it. This is
+      ;; what lets a viewport painted into a window-sized buffer (see `:viewport`) avoid touching the
+      ;; rows that are scrolled out of view.
+      buffer
+      (case tag
+        (:text :button)
+        (let [lines (if (wrapping-text? node)
+                      (wrap-text (text-content node) (:w cr))
+                      (str/split (text-content node) #"\n" -1))]
           (reduce
             (fn [b [i line]]
               (put-str b (:x cr) (+ (:y cr) i) line style content-clip))
             buffer
-            (map-indexed vector window)))
-        (put-str buffer (:x cr) (:y cr) (str (:value attrs "")) style content-clip))
+            (map-indexed vector lines)))
 
-      :line
-      (let [{:keys [x y w h]} rect
-            horizontal? (>= w h)
-            rule        (if horizontal? \─ \│)]
-        (reduce
-          (fn [b [cx cy]]
-            (if (in-clip? node-clip cx cy) (put-cell b cx cy rule style) b))
-          buffer
-          (for [cy (range y (+ y h)) cx (range x (+ x w))] [cx cy])))
+        :input
+        (if (multiline-input? node)
+          ;; A multiline input renders its value wrapped to its content width, scrolled vertically by
+          ;; the internal top-line offset (`::text-scroll`, injected by the driver to keep the caret
+          ;; visible). Each visible visual row is painted into its rect row (clipped).
+          (let [top    (max 0 (long (or (::text-scroll node) 0)))
+                lines  (mapv :text (wrap-layout (str (:value attrs "")) (:w cr)))
+                window (subvec lines (min top (count lines)) (min (+ top (:h cr)) (count lines)))]
+            (reduce
+              (fn [b [i line]]
+                (put-str b (:x cr) (+ (:y cr) i) line style content-clip))
+              buffer
+              (map-indexed vector window)))
+          (put-str buffer (:x cr) (:y cr) (str (:value attrs "")) style content-clip))
 
-      :viewport
-      ;; Render the virtual child subtree into a fresh VIRTUAL buffer sized to the virtual content,
-      ;; then blit the [scroll-x scroll-y view-w view-h] window of that buffer into the viewport's
-      ;; content rect in the main buffer. The border (if any) is drawn on the outer rect.
-      (let [vsize      (or (::virtual-size node) {:w 0 :h 0})
-            vchild     (::viewport-content node)
-            raw-scroll (or (::scroll node) {:x 0 :y 0})
-            scroll     (clamp-scroll raw-scroll vsize {:w (:w cr) :h (:h cr)})
-            buf        (if (seq style) (fill-rect buffer cr style content-clip) buffer)
-            buf        (if (:border? attrs) (draw-border buf rect style node-clip) buf)
-            buf        (if (and vchild (pos? (:w vsize)) (pos? (:h vsize)))
-                         (let [vbuf (render-buffer vchild (:h vsize) (:w vsize))]
-                           (blit buf vbuf (:x scroll) (:y scroll) (:w cr) (:h cr)
-                             (:x cr) (:y cr) content-clip))
-                         buf)]
-        buf)
+        :line
+        (let [{:keys [x y w h]} rect
+              horizontal? (>= w h)
+              rule        (if horizontal? \─ \│)]
+          (reduce
+            (fn [b [cx cy]]
+              (if (in-clip? node-clip cx cy) (put-cell b cx cy rule style) b))
+            buffer
+            (for [cy (range y (+ y h)) cx (range x (+ x w))] [cx cy])))
 
-      :modal
-      ;; A modal is opaque: it fills its whole rect (with spaces, clearing any base UI painted
-      ;; beneath it) before drawing its border/title and children, so the overlay reads cleanly
-      ;; on top of whatever the driver painted first.
-      (let [buf (fill-rect buffer rect style node-clip)
-            buf (if (:border? attrs) (draw-border buf rect style node-clip) buf)
-            buf (if-let [title (:title attrs)]
-                  (put-str buf (+ (:x rect) 2) (:y rect) (str " " title " ") style node-clip)
-                  buf)]
-        (reduce (fn [b child] (paint b child node-clip)) buf children))
+        :viewport
+        ;; Render ONLY the visible window: shift the virtual child up/left by the scroll offset and
+        ;; paint it into a buffer sized to the viewport's CONTENT rect (not the full virtual content),
+        ;; then blit that window into the content rect in the main buffer. Rows/columns scrolled out of
+        ;; view land at negative coords and are culled (their rect no longer intersects the window
+        ;; buffer), so off-screen content is never painted — a large saving for a tall list. The
+        ;; border (if any) is drawn on the outer rect.
+        (let [vsize      (or (::virtual-size node) {:w 0 :h 0})
+              vchild     (::viewport-content node)
+              raw-scroll (or (::scroll node) {:x 0 :y 0})
+              scroll     (clamp-scroll raw-scroll vsize {:w (:w cr) :h (:h cr)})
+              buf        (if (needs-bg-fill? style) (fill-rect buffer cr style content-clip) buffer)
+              buf        (if (:border? attrs) (draw-border buf rect style node-clip) buf)
+              buf        (if (and vchild (pos? (:w vsize)) (pos? (:h vsize)) (pos? (:w cr)) (pos? (:h cr)))
+                           (let [shifted (translate-placed vchild (- (:x scroll)) (- (:y scroll)))
+                                 vbuf    (render-buffer shifted (:h cr) (:w cr))]
+                             (blit buf vbuf 0 0 (:w cr) (:h cr) (:x cr) (:y cr) content-clip))
+                           buf)]
+          buf)
 
-      (:box :vbox :hbox)
-      (let [buf (if (seq style) (fill-rect buffer cr style content-clip) buffer)
-            buf (if (:border? attrs) (draw-border buf rect style node-clip) buf)]
-        (reduce (fn [b child] (paint b child node-clip)) buf children))
+        :modal
+        ;; A modal is opaque: it fills its whole rect (with spaces, clearing any base UI painted
+        ;; beneath it) before drawing its border/title and children, so the overlay reads cleanly
+        ;; on top of whatever the driver painted first.
+        (let [buf (fill-rect buffer rect style node-clip)
+              buf (if (:border? attrs) (draw-border buf rect style node-clip) buf)
+              buf (if-let [title (:title attrs)]
+                    (put-str buf (+ (:x rect) 2) (:y rect) (str " " title " ") style node-clip)
+                    buf)]
+          (reduce (fn [b child] (paint b child node-clip)) buf children))
 
-      buffer)))
+        (:box :vbox :hbox)
+        (let [buf (if (needs-bg-fill? style) (fill-rect buffer cr style content-clip) buffer)
+              buf (if (:border? attrs) (draw-border buf rect style node-clip) buf)]
+          (reduce (fn [b child] (paint b child node-clip)) buf children))
+
+        buffer))))
 
 (defmethod paint :default [buffer node clip]
   ;; Built-in tags (and unregistered custom tags) route here. The `p` per-tag profiling wraps EVERY
@@ -1317,19 +1353,32 @@ is focused."
                     app-or-state)]
     (get state-map ::focus)))
 
+(def ^:dynamic *suppress-render*
+  "When true, render-triggering side effects (e.g. `focus!`'s `schedule-render!`) are SKIPPED because
+   the caller is about to render once after a batch of state changes. The driver binds this true
+   around `dispatch-key!` so a single keystroke that moves focus AND adjusts viewport scroll renders
+   ONE frame (at the end of dispatch) instead of one frame per mutation — eliminating a redundant
+   full tree build + paint per keypress. Default false, so a standalone `focus!` (no driver loop)
+   still repaints immediately."
+  false)
+
 (>defn focus!
   "Sets the focused node `:id` to `id` in the app's state-map at `::focus` (the
 single source of truth) via a direct `swap!`. If the app declares a renderer
 (`:com.fulcrologic.fulcro.application/render-root!`/`schedule-render!`) it triggers
 a render so the change is reflected on screen, but it remains usable without a
-terminal. Returns the app."
+terminal. Returns the app.
+
+The render is skipped when `*suppress-render*` is bound true (the driver batches a keystroke's
+mutations into a single post-dispatch render); the focus state change still happens."
   [app id]
   [any? any? => any?]
   (when-let [state-atom (:com.fulcrologic.fulcro.application/state-atom app)]
     (swap! state-atom assoc ::focus id))
-  (try
-    (rapp/schedule-render! app)
-    (catch Throwable _ nil))
+  (when-not *suppress-render*
+    (try
+      (rapp/schedule-render! app)
+      (catch Throwable _ nil)))
   app)
 
 ;; ----------------------------------------------------------------------------
@@ -1915,22 +1964,45 @@ are resolved against the screen and clamped to it, and the window is positioned 
 ;; process-key! — single-step driver
 ;; ----------------------------------------------------------------------------
 
+(>def ::node-tree-cache
+  "Per-frame memo of the rendered node tree: `{:state <state-map> :tree <full-tree>}`, stored in the
+   app runtime atom. The tree is a pure function of the state-map (focus lives in it under `::focus`),
+   so the state-map's IDENTITY is a complete cache key. The driver's `render!` always renders fresh
+   (it is the painting authority) and writes this entry; `current-node-tree` reuses it when the
+   state-map is unchanged — which is the common case between a paint and the next keystroke — so
+   focus-ring computation in `process-key!` does not re-render the whole tree a second time."
+  (s/nilable (s/keys :req-un [::tree])))
+(>def ::tree any?)
+
 (>defn current-node-tree
   "Returns the current pure TUI node tree for `app`, computed from its state. The root
 class is read from the runtime atom
 (`:com.fulcrologic.fulcro.application/root-class`); its props are obtained via
 `fdn/db->tree` of the root query over the state-map. `*current-focus*` is bound to
-the current `::focus` while rendering so render code can call `focused?`."
+the current `::focus` while rendering so render code can call `focused?`.
+
+The result is memoized in the runtime atom keyed on state-map IDENTITY (`::node-tree-cache`): when
+the state-map has not changed since the tree was last built (by `render!` or a prior call here) the
+cached tree is returned, avoiding a redundant full render-tree walk (e.g. `process-key!` resolving
+the focus ring on the same state the last frame painted). Any state mutation yields a new map
+identity, so the cache can never go stale."
   [app]
   [any? => any?]
   (let [state-map  (some-> app :com.fulcrologic.fulcro.application/state-atom deref)
-        root-class (some-> app :com.fulcrologic.fulcro.application/runtime-atom deref
-                     :com.fulcrologic.fulcro.application/root-class)]
-    (when (and state-map root-class)
+        rt-atom    (:com.fulcrologic.fulcro.application/runtime-atom app)
+        rt         (some-> rt-atom deref)
+        root-class (:com.fulcrologic.fulcro.application/root-class rt)
+        cache      (::node-tree-cache rt)]
+    (cond
+      (and cache (identical? (:state cache) state-map)) (:tree cache)
+      (and state-map root-class)
       (let [query (rc/get-query root-class state-map)
-            props (fdn/db->tree query state-map state-map)]
-        (binding [*current-focus* (get state-map ::focus)]
-          (render-root root-class props app))))))
+            props (fdn/db->tree query state-map state-map)
+            tree  (binding [*current-focus* (get state-map ::focus)]
+                    (render-root root-class props app))]
+        (when rt-atom (swap! rt-atom assoc ::node-tree-cache {:state state-map :tree tree}))
+        tree)
+      :else nil)))
 
 (>defn- resolve-focus!
   "Re-resolves focus after a dispatch may have changed `app`'s state/tree. Recomputes

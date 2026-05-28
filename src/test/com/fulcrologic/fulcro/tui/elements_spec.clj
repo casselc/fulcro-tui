@@ -4,7 +4,7 @@
     [com.fulcrologic.fulcro.tui.engine :as engine]
     [fulcro-spec.core :refer [=> assertions component specification]]))
 
-(specification {:covers {`elements/element "abe4b1,a84a87"}} "element generators"
+(specification {:covers {`elements/element "abe4b1,2fa298"}} "element generators"
   (component "attribute handling"
     (assertions
       "uses a leading map as the node's attributes"

@@ -72,6 +72,31 @@
                 (mapv (fn [k] (control/render-control report-instance k)) row)))
         input-layout))))
 
+(defn render-page-nav
+  "Renders the pagination bar — Prev / Next buttons flanking a `Page X / Y` indicator — when the
+   report paginates and has more than one page. Buttons are focusable nodes wired to the statechart's
+   `prior-page!`/`next-page!`; a button at the first/last page is shown disabled (dimmed, inert)."
+  [report-instance]
+  (when (?! (comp/component-options report-instance ::report/paginate?) report-instance)
+    (let [page  (screport/current-page report-instance)
+          pages (max 1 (screport/page-count report-instance))]
+      (when (> pages 1)
+        (let [first? (<= page 1)
+              last?  (>= page pages)
+              nav    (fn [id label disabled? activate]
+                       (button {:id          id
+                                :color       (if disabled? :bright-black :cyan)
+                                :highlight   (and (not disabled?) (e/focused? id))
+                                :on-activate (fn [] (when-not disabled? (activate)))}
+                         label))]
+          (hbox {:height 1}
+            (nav :report/prev-page " ◀ Prev " first?
+              (fn [] (screport/prior-page! report-instance)))
+            (text {:width 14 :bold true :color :bright-cyan}
+              (str "  Page " page " / " pages "  "))
+            (nav :report/next-page " Next ▶ " last?
+              (fn [] (screport/next-page! report-instance)))))))))
+
 (defn render-table-report-layout
   "Renders the whole table report: the control bar, a column header row, and a scrolling viewport of
    data rows (each via `report/render-row`)."
@@ -79,16 +104,22 @@
   (let [{::report/keys [columns]} (comp/component-options report-instance)
         render-controls (screport/control-renderer report-instance)
         rows            (screport/current-rows report-instance)]
-    (vbox {:border? true :color :cyan :padding 1}
+    ;; `:grow 1` makes the report fill the vertical space the root frame hands it (rather than just
+    ;; its content height), so the rows viewport below — also `:grow 1` — can expand to fill the
+    ;; screen and scroll, instead of being pinned to a small fixed height.
+    (vbox {:border? true :color :cyan :padding 1 :grow 1}
       (when render-controls
         (render-controls report-instance))
+      (render-page-nav report-instance)
       (line {})
       (hbox {:height 1}
         (mapv (fn [c] (text {:width col-width :bold true :color :bright-cyan}
                         (column-label report-instance c)))
           columns))
       (line {})
-      (viewport {:id :report-rows :height 10 :border? true :color :bright-black}
+      ;; The rows scroll inside a viewport that hogs the leftover height (`:grow 1`). Arrowing
+      ;; through the focusable rows autoscrolls it (viewport-follows-focus); PageUp/PageDown page it.
+      (viewport {:id :report-rows :grow 1 :border? true :color :bright-black}
         (vbox {}
           (if (seq rows)
             (map-indexed
