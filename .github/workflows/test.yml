@@ -44,7 +44,9 @@ jobs:
       - name: Setup babashka
         uses: DeLaGuardo/setup-clojure@13.4
         with:
-          bb: 'latest'
+          # Pin the version: `bb: 'latest'` resolves the newest release via the GitHub API at job
+          # start and intermittently fails ("Can't obtain latest Babashka version") on rate limits.
+          bb: '1.12.218'
       - name: Cache babashka deps
         uses: actions/cache@v4
         with:

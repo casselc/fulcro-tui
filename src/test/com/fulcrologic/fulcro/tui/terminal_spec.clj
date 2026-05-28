@@ -41,7 +41,7 @@
     "uses y as the row and x as the column"
     (sut/cursor-position-string 4 2) => (str ESC "[3;5H")))
 
-(specification {:covers {`sut/decode-key "339da7,2ec5c3"}} "decode-key"
+(specification {:covers {`sut/decode-key "339da7,1b49db"}} "decode-key"
   (component "empty input"
     (assertions
       "returns nil when there are no code points"

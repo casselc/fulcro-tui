@@ -83,9 +83,9 @@
 
 ;; ---------------------------------------------------------------------------
 
-(specification {:covers {`app/application      "0c544b,8ae89b"
-                         `app/attach!          "d47881,627c9a"
-                         `app/render!          "35406a,7839ca"
+(specification {:covers {`app/application      "0c544b,1e6acb"
+                         `app/attach!          "d47881,9cc90f"
+                         `app/render!          "b81026,7839ca"
                          `app/screen-of        "0ca459,662c58"
                          `app/screen-styled-of "3815eb,5083b1"
                          `app/terminal         "18f70c,089ec1"}} "application / attach! (initial paint)"
@@ -111,7 +111,7 @@
         "the hardware cursor is shown at input :a's caret origin (0,0)"
         (term/cursor t) => {:x 0 :y 0 :visible? true}))))
 
-(specification {:covers {`app/step! "6b509b,3ffcf0"}} "step! — focus, typing, and activation"
+(specification {:covers {`app/step! "6b509b,7edb14"}} "step! — focus, typing, and activation"
   (component "Tab moves focus and follows the cursor to the newly focused input"
     (let [app (new-app)
           t   (term/string-terminal {:rows 10 :cols 30})]
@@ -155,7 +155,7 @@
         "the repaint shows the button's updated label"
         (nth (app/screen-of app) 2) => "DONE                          "))))
 
-(specification {:covers {`app/render!          "35406a,7839ca"
+(specification {:covers {`app/render!          "b81026,7839ca"
                          `app/too-small-buffer "6bd38f,3e293f"}} "render! — diff path & resize"
   (component "a no-op re-render produces no terminal output"
     (let [app (new-app)
@@ -197,7 +197,7 @@
           (str/includes? (first scr) "too small") => true
           (str/includes? (first scr) "10x5") => true)))))
 
-(specification {:covers {`app/step!         "6b509b,3ffcf0"
+(specification {:covers {`app/step!         "6b509b,7edb14"
                          `app/follow-focus! "f2b69d,09b8da"}} "viewport scrolling, follow-focus, and cursor tracking"
   (component "Tab into the list auto-scrolls the viewport so the focused item stays visible"
     (let [app (new-vp-app)
@@ -326,8 +326,8 @@
         "scrolling back up reveals the first wrapped row again"
         (first (app/screen-of app)) => "the quick   "))))
 
-(specification {:covers {`app/mount!        "9db704,61f97c"
-                         `app/run-blocking! "ecfe25,e87bb0"
+(specification {:covers {`app/mount!        "9db704,3e8130"
+                         `app/run-blocking! "ecfe25,ccf6a6"
                          `app/quit!         "aa6cd2,a354d9"}} "mount! / run! — input loop"
   (component "run! with a finite key script processes the keys and ends, leaving the terminal"
     (let [app (new-app)
@@ -400,8 +400,8 @@
 (defn- new-picker-app []
   (app/application {:root-class PickerRoot :initial-state true}))
 
-(specification {:covers {`app/render! "35406a,7839ca"
-                         `app/step!   "6b509b,3ffcf0"}} "overlay compositing & focus trap"
+(specification {:covers {`app/render! "b81026,7839ca"
+                         `app/step!   "6b509b,7edb14"}} "overlay compositing & focus trap"
   (component "while the picker is closed only the base UI is focusable and painted"
     (let [app (new-picker-app)
           t   (term/string-terminal {:rows 10 :cols 24})]
@@ -452,7 +452,7 @@
           "the base UI paints un-obscured again (no modal border on screen)"
           (str/includes? (apply str scr) "Fruit") => false)))))
 
-(specification {:covers {`app/step!         "6b509b,3ffcf0"
+(specification {:covers {`app/step!         "6b509b,7edb14"
                          `app/follow-focus! "f2b69d,09b8da"}} "picker scrolling and selection"
   (component "arrowing down past the visible rows auto-scrolls the picker's viewport"
     (let [app (new-picker-app)
@@ -491,7 +491,7 @@
 ;; Entrypoint niceties: start!, app-level global-keymap, lifecycle (C1/C2).
 ;; ---------------------------------------------------------------------------
 
-(specification {:covers {`app/start! "f91686,3ea436"}} "start! — build + run in one call"
+(specification {:covers {`app/start! "f91686,f52ee8"}} "start! — build + run in one call"
   (component "start! builds the app (application) and runs it to completion (run-blocking!)"
     (let [t      (term/string-terminal {:rows 10 :cols 30
                                         :keys [{:key "H" :char "H"}
@@ -571,7 +571,7 @@
         "the loop stopped and left the terminal"
         (:left? @(.-state t)) => true))))
 
-(specification {:covers {`app/request-render! "92aa4b,3f0655"}} "request-render! — throttle + coalescing"
+(specification {:covers {`app/request-render! "92aa4b,3b5862"}} "request-render! — throttle + coalescing"
   (let [runtime-key :com.fulcrologic.fulcro.application/runtime-atom]
     (component "throttling disabled (default) renders synchronously, one render per request"
       (let [app    (new-app)

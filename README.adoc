@@ -110,6 +110,7 @@ bb server                   # terminal 1 — JVM: Datomic Local (in-memory) + tr
                             #   (shells `clojure -M:demo-server`; Datomic Local is JVM-only)
 bb demo                     # terminal 2 — babashka client …
 clojure -M:demo             #   … or the JVM client (same server)
+clojure -M:inspect:demo     #   … or the JVM client with fulcro inspect electron support (started separately)
 ----
 
 A top nav bar switches between the three reports (*Alt-1/2/3*, or *Tab* to a nav button + *Enter*).

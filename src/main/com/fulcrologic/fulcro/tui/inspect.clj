@@ -25,22 +25,51 @@
    wrapped in the `ilet` macro that only emits in CLJ when that property is \"true\".)"
   (:require
     [clojure.core.async :as async]
+    [cognitect.transit :as t]
     [com.fulcrologic.devtools.common.built-in-mutations :as bi]
     [com.fulcrologic.devtools.common.connection :as cc]
     [com.fulcrologic.devtools.common.message-keys :as mk]
     [com.fulcrologic.devtools.common.protocols :as dp]
     [com.fulcrologic.devtools.common.target :as target]
     [com.fulcrologic.devtools.common.transit :as encode]
+    [com.fulcrologic.devtools.common.utils :refer [strip-lambdas]]
+    [com.fulcrologic.fulcro.algorithms.transit :as ft]
     [fulcro.inspect.tool :as it]
     [taoensso.encore :as enc]
     [taoensso.sente :as sente]
     [taoensso.timbre :as log])
   (:import (com.fulcrologic.devtools.common.connection Connection)))
 
+(def ^:private unknown-value-handler
+  "Transit *default* write handler for the inspect packer. The JVM transit registry only knows a few
+   types, so a Fulcro app's state-map carries values it cannot encode — `java.time.Instant` (RAD
+   `:instant`/`:date-at-noon`), app records, statechart objects, etc. `devtools` swallows the
+   resulting encode failure to `nil`, which Sente then refuses to send (\"Cannot send null\") and the
+   whole `db-changed`/statechart message is dropped. Mirroring `com.fulcrologic.fulcro.inspect.transit`
+   (CLJS), this catch-all wraps any otherwise-unencodable value as the `\"unknown\"` tag with its
+   string representation, so Inspect shows a marker instead of the message being lost."
+  (t/write-handler
+    (fn [_] "unknown")
+    (fn [v] (try (str v) (catch Throwable _ "UNENCODED VALUE")))))
+
+(defn inspect-write
+  "Serializes `x` to a transit string for the inspect websocket. Like
+   `com.fulcrologic.devtools.common.transit/write` (strips lambdas, no metadata) but installs a
+   transit `:default-handler` so an unencodable value becomes a display marker rather than throwing
+   (and being silently dropped). Scoped to the inspect packer ONLY — it does not touch the global
+   transit registry, so the app's own client/server wire format is unaffected. Returns the string, or
+   `nil` on an unexpected failure (logged)."
+  [x]
+  (try
+    (ft/transit-clj->str (strip-lambdas x) {:metadata? false :default-handler unknown-value-handler})
+    (catch Throwable e
+      (log/error e "inspect: failed to serialize a devtool message")
+      nil)))
+
 ;; Sente packer that matches what the Inspect server expects (transit, same as the electron target).
 (deftype TransitPacker []
   taoensso.sente.interfaces/IPacker
-  (pack [_ x] (encode/write x))
+  (pack [_ x] (inspect-write x))
   (unpack [_ s] (encode/read s)))
 
 (defn make-packer [] (->TransitPacker))
@@ -158,4 +187,12 @@
   [app]
   (enable!)
   (install!)
+  ;; The Statecharts viewer pulls `:statechart/available-sessions`. That resolver lives in the
+  ;; statecharts Fulcro integration and registers itself with the devtools Pathom parser only as a
+  ;; side effect of being loaded — nothing on this JVM connector path requires it, so load it now so
+  ;; the parser can answer the pull. (No-op/ignored if the app does not use statecharts.)
+  (try
+    (require 'com.fulcrologic.statecharts.integration.fulcro-impl)
+    (catch Throwable e
+      (log/warn e "inspect: could not load statecharts devtools integration; the Statecharts viewer will be empty")))
   (it/add-fulcro-inspect! app))
