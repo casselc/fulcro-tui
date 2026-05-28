@@ -60,7 +60,11 @@
                                        :default-value    ""
                                        :action           (fn [this] (report/filter-rows! this))
                                        po/cache-time-ms   30000
-                                       po/cache-key       :category/all-categories
+                                       ;; Distinct cache-key: this filter stores label STRING values
+                                       ;; ("All"/"Hardware"), whereas the ItemForm category FIELD stores
+                                       ;; ident values under the default :category/all-categories key.
+                                       ;; Sharing a key would clobber the field's options.
+                                       po/cache-key       :inventory.filter/category
                                        po/query-key       :category/all-categories
                                        po/query-component CategoryQuery
                                        po/options-xform   (fn [_ categories]

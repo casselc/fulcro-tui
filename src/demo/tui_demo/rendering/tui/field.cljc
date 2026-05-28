@@ -262,16 +262,30 @@
 ;; Ref pickers (to-one / to-many) — picker-options driven
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(defn- ref-value->ident
+  "Normalizes a to-one `:ref` field's current value to an ident `[id-key id]` (or nil). A loaded ref
+   is a denormalized `{id-key id}` map; a just-selected ref (set via `m/set-value!!`) is a bare ident
+   vector. Both must resolve to the same ident so the current selection matches an option."
+  [target-id-key value]
+  (cond
+    (and (vector? value) (= 2 (count value)) (keyword? (first value))) value
+    (and (map? value) (some? (get value target-id-key)))               [target-id-key (get value target-id-key)]
+    :else nil))
+
 (defn render-ref-pick-one
   "Renders a to-one `:ref` field as a button showing the current selection; activating opens a modal
    list of options. Options come from the picker-options cache (`po/current-form-options`, loaded by
    the form's `load-picker-options` step / dependent `:on-change` triggers). Selecting sets the ref
-   ident, fires `input-changed!` (so dependent pickers/derives run), and closes."
+   ident, fires `input-changed!` (so dependent pickers/derives run), and closes.
+
+   The current label is matched directly from the field value rather than via `po/current-to-one-*`,
+   which only reads a denormalized `{id-key id}` map and so would show UNSELECTED for a freshly-picked
+   bare-ident value."
   [{::rform/keys [form-instance] :as env} {::attr/keys [qualified-key] :as attribute}]
-  (let [{:keys [visible? read-only?] :as ctx} (form/field-context env attribute)
+  (let [{:keys [value visible? read-only?] :as ctx} (form/field-context env attribute)
         options     (vec (po/current-form-options form-instance attribute))
-        current-val (po/current-to-one-value form-instance attribute)
-        current-lbl (po/current-to-one-label form-instance attribute)
+        current-val (ref-value->ident (ao/target attribute) value)
+        current-lbl (some (fn [opt] (when (= (:value opt) current-val) (:text opt))) options)
         pick-id     (field-node-id form-instance qualified-key "pick")]
     (when visible?
       (vbox {}

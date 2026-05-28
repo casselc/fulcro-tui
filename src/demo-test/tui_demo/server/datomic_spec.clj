@@ -124,6 +124,22 @@
       "persists the new account so it appears in the (active) accounts list"
       (some #{"Zelda"} (map :account/name after)) => "Zelda")))
 
+(specification "set-account-active mutation round-trip"
+  (let [conn      (fresh-test-conn!)
+        alice-id  (account-id-by-name conn "Alice")
+        active-of (fn [] (-> (parser/process-eql [{[:account/id alice-id] [:account/active?]}])
+                           (get [:account/id alice-id]) :account/active?))
+        before    (active-of)
+        _         (parser/process-eql
+                    [`(tui-demo.model.account/set-account-active
+                        {:account/id ~alice-id :account/active? false})])
+        after     (active-of)]
+    (assertions
+      "the seeded account starts active"
+      before => true
+      "the mutation persists the account as inactive"
+      after => false)))
+
 (specification "form delete round-trip"
   (let [conn   (fresh-test-conn!)
         bob-id (account-id-by-name conn "Bob")
