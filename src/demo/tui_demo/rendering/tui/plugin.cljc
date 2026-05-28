@@ -30,7 +30,10 @@
    :com.fulcrologic.rad.report/control-style->control
    {:default report/render-standard-controls}
 
-   ;; ── Generic controls (buttons / inputs on reports/forms) ──────────────────
+   ;; ── Generic controls (buttons / inputs / toggles / pickers on reports/forms) ──
    :com.fulcrologic.rad.control/type->style->control
-   {:button {:default field/render-button-control}
-    :string {:default field/render-string-control}}})
+   {:button  {:default field/render-button-control}
+    :string  {:default field/render-string-control}
+    :boolean {:default field/render-boolean-control
+              :toggle  field/render-boolean-control}
+    :picker  {:default field/render-picker-control}}})
