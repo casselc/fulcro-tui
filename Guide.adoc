@@ -497,6 +497,42 @@ is Tab, `"a"` is the letter a. Key events themselves are normalized maps with
 `term/special-keys` (`:enter :tab :escape :backspace :delete :up :down :left
 :right :home :end :page-up :page-down :backtab`).
 
+== Control shortcuts and the enhanced keyboard
+
+A control can declare a `:shortcut` chord (e.g. `[:alt "s"]`) that focuses (and, for
+buttons, activates) it from anywhere, with its mnemonic letter underlined in the label.
+Modified chords like `Alt-s` can only be captured when the terminal supports the
+*Kitty/fixterms enhanced keyboard protocol* (CSI-u). The driver probes for it at startup
+and, when it is absent, the whole shortcut layer — and the mnemonic underlines — stay
+*off*. kitty, ghostty, WezTerm and recent Alacritty support it out of the box.
+
+[NOTE]
+.iTerm2: turn on `Esc+` for the Option key
+====
+iTerm2 *answers* the CSI-u probe (so the protocol reports as enabled), but by default the
+*Option* key composes a character — `Alt-s` is sent as `ß`, not as a modified key — so
+shortcuts appear dead. Fix it once per profile:
+
+*Settings → Profiles → Keys → General → Left Option key: `Esc+`* (set Right Option too if
+you use it). After that `Alt-s` arrives as the CSI-u sequence `ESC [ 115 ; 3 u` and the
+shortcuts fire.
+====
+
+To see exactly what your terminal sends for a chord, run the byte-level probe *in that
+terminal* and press the key (it works under both `clojure` and `bb`):
+
+[source,shell]
+-----
+clojure
+user=> ((requiring-resolve 'com.fulcrologic.fulcro.tui.terminal/probe-key!))
+-----
+
+A conforming terminal prints `:alt? true` for `Alt-s`; a composing terminal prints a single
+code point with `:alt? false`. For terminal stacks that carry CSI-u but swallow the startup
+query (e.g. tmux with `extended-keys on`), force the protocol on with the
+`fulcro.tui.enhanced-keys` system property (or `FULCRO_TUI_ENHANCED_KEYS` env var) set to
+`force`; set it to `off` to disable.
+
 = Modals & Pickers
 
 == Modals

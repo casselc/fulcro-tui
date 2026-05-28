@@ -450,6 +450,52 @@ both are incremented."
         (println "probe threw:" (ex-message t))
         false))))
 
+(defn probe-key!
+  "Diagnostic: builds a system JLine terminal, ENABLES the enhanced keyboard protocol (same push the
+   driver does), then reads `n` (default 8) keypresses and prints, for each, the raw code points and
+   the `decode-key` result. Use this to see what a terminal actually sends for a chord like Alt-s
+   AFTER the protocol is enabled — a Kitty-conforming terminal sends `ESC [ <cp> ; <mods> u`; iTerm
+   with Left-Option set to compose sends a single composed code point and NO `:alt?`.
+
+   Run directly in the target terminal, press the keys to test, then press `q`:
+   `clojure -e \"((requiring-resolve 'com.fulcrologic.fulcro.tui.terminal/probe-key!))\"`"
+  ([] (probe-key! 8))
+  ([n]
+   (let [term (.. (TerminalBuilder/builder) (system true) (build))]
+     (try
+       (.enterRawMode term)
+       (let [w (.writer term)
+             r ^NonBlockingReader (.reader term)]
+         (.write w ^String ansi-kitty-enable)
+         (.flush w)
+         (println "=== fulcro-tui key probe (protocol enabled) — press keys, 'q' to quit ===")
+         (loop [i 0]
+           (when (< i n)
+             ;; gather ESC + immediately-available bytes (same heuristic as the real input loop)
+             (let [first-c (.read r)]
+               (when-not (= first-c NonBlockingReader/EOF)
+                 (let [acc (transient [(int first-c)])]
+                   (when (= first-c 27)
+                     (loop []
+                       (let [b (.read r 5)]
+                         (when (and (not= b NonBlockingReader/READ_EXPIRED)
+                                 (not= b NonBlockingReader/EOF))
+                           (conj! acc (int b))
+                           (recur)))))
+                   (let [ints (persistent! acc)
+                         [ev _] (decode-key ints)]
+                     (println "raw=" ints " decoded=" (pr-str ev))
+                     (when-not (= (:char ev) "q")
+                       (recur (inc i)))))))))
+         (.write w ^String ansi-kitty-disable)
+         (.flush w)
+         (.close term)
+         nil)
+       (catch Throwable t
+         (try (.close term) (catch Throwable _ nil))
+         (println "probe threw:" (ex-message t))
+         nil)))))
+
 ;; =============================================================================
 ;; Fake terminal (string-terminal)
 ;; =============================================================================
