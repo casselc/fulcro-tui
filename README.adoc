@@ -82,9 +82,11 @@ babashka.
 
 Architecture (two tiers, under `src/demo/tui_demo/`):
 
-* *Server* (JVM): an in-memory https://github.com/tonsky/datascript[Datascript] database behind a
-  Pathom 2 parser and a small hand-written RAD Datascript driver, served at `/api` (http-kit + Fulcro's
-  transit middleware). `tui_demo.server.*`.
+* *Server* (JVM only): an in-memory https://docs.datomic.com/datomic-local.html[Datomic Local] database
+  (`:dev-local`, `:storage-dir :mem`) behind a Pathom 2 parser, using the well-tested
+  `fulcro-rad-datomic` (datomic-cloud) adapter for schema/resolvers/save/delete, served at `/api`
+  (http-kit + Fulcro's transit middleware). `tui_demo.server.*`. (Datomic Local does not run under
+  babashka, so the server is JVM-only; the babashka client talks to it over HTTP.)
 * *Client* (JVM or babashka): the fulcro-tui app + RAD `defsc-report`/`defsc-form` + statechart routing,
   rendered by a small RAD UI plugin that maps reports/forms to terminal elements (installed with
   `install-ui-controls!`, modeled on the semantic-ui plugin). A synchronous transit HTTP remote
@@ -95,14 +97,18 @@ Run it — start the server, then the client (in a second terminal):
 
 [source,bash]
 ----
-clojure -M:demo-server      # JVM: Datascript + transit /api on :3001
-clojure -M:demo             # JVM client …
-bb run demo                 # … or the babashka client (same JVM server)
+bb server                   # terminal 1 — JVM: Datomic Local (in-memory) + transit /api on :3001
+                            #   (shells `clojure -M:demo-server`; Datomic Local is JVM-only)
+bb demo                     # terminal 2 — babashka client …
+clojure -M:demo             #   … or the JVM client (same server)
 ----
 
 The report lists invoices (customer, date, total); *Tab* / *arrows* move the row highlight, *Enter*
 opens the invoice in an edit form (pick-one customer, date, an editable line-item subform with *Add*),
-and saving persists back to Datascript through the transit API. *Ctrl-Q* quits.
+and saving persists back to Datomic through the transit API. *Ctrl-Q* quits.
+
+Server/model integration tests (JVM, Datomic) live in `src/demo-test`; run them with
+`clojure -M:demo-server:test:demo-test`.
 
 NOTE: this demo pulls cutting-edge releases of fulcro, statecharts, fulcro-rad and
 fulcro-rad-statecharts (see the `:demo` / `:demo-server` aliases in `deps.edn` and the `demo` task in
