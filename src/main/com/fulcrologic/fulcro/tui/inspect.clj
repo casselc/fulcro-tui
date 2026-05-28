@@ -34,10 +34,6 @@
     [com.fulcrologic.devtools.common.transit :as encode]
     [com.fulcrologic.devtools.common.utils :refer [strip-lambdas]]
     [com.fulcrologic.fulcro.algorithms.transit :as ft]
-    [com.fulcrologic.fulcro.inspect.devtool-api :as devtool]
-    [com.fulcrologic.fulcro.inspect.inspect-client :as ic]
-    [com.fulcrologic.fulcro.inspect.target-impl :as timpl]
-    [com.fulcrologic.fulcro.inspect.tools :as fit]
     [fulcro.inspect.tool :as it]
     [taoensso.encore :as enc]
     [taoensso.sente :as sente]
@@ -182,50 +178,23 @@
     (constantly "true"))
   nil)
 
-(defn install-db-sync!
-  "Pushes the app's state to Fulcro Inspect's DB/state viewer on every change. This is the piece that
-   is MISSING on the JVM: Fulcro's tx pipeline emits transaction and network events (via the `ilet`
-   blocks) but never calls `db-changed!`, and installs no state watcher — so on a non-browser app the
-   DB viewer stays empty. We watch the app's state-atom and send each new state as a full
-   `:history/value` snapshot (self-contained, so Inspect needs no prior baseline to diff against), plus
-   one immediate snapshot so the viewer populates on connect. Returns `app`."
-  [app]
-  (let [state-atom (:com.fulcrologic.fulcro.application/state-atom app)
-        send!      (fn [state]
-                     (try
-                       (let [version (ic/record-history-entry! app state)]
-                         (fit/notify! app `devtool/db-changed {:history/version version
-                                                               :history/value   state}))
-                       (catch Throwable e
-                         (log/error e "inspect: failed to push db state"))))]
-    (when state-atom
-      (send! @state-atom)
-      (add-watch state-atom ::db-sync
-        (fn [_ _ old new] (when-not (identical? old new) (send! new)))))
-    app))
-
 (defn add-inspect!
-  "Enable inspect, install the JVM websocket factory, and attach Fulcro Inspect to `app`.
+  "Enable inspect, install the JVM websocket factory, and attach Fulcro Inspect to `app`. Order
+   matters: `enable!` flips the inspect gates so the body of `add-fulcro-inspect!` (and `connect!`)
+   actually runs; `install!` registers the JVM websocket transport that `connect!` uses; then
+   `add-fulcro-inspect!` does everything else — registers the app in the inspect registry, seeds
+   history, installs the state watcher that emits `db-changed`, and wires the connection's request
+   processor to the devtools Pathom parser. The parser's resolvers (transactions, network, db/history,
+   and the statecharts integration's `:statechart/available-sessions`) register themselves simply by
+   being loaded, and the app already loads them by using statecharts — so there is nothing to register
+   here. The only genuinely JVM-specific pieces are the websocket transport and transit encoding (see
+   `inspect-write`, which lets state/session payloads carry `java.time.Instant` etc. without being
+   silently dropped).
 
-   This is a debug-only convenience: it force-enables both inspect gates (see `enable!`) so you do
-   NOT need to start the JVM with any `-D` flags. Requires the standalone Fulcro Inspect (Electron)
-   app to be running (websocket server on localhost:8237)."
+   Debug-only convenience: force-enables both inspect gates so no `-D` flags are needed. Requires the
+   standalone Fulcro Inspect (Electron) app running (websocket server on localhost:8237)."
   [app]
   (enable!)
   (install!)
-  ;; The Statecharts viewer pulls `:statechart/available-sessions`. That resolver lives in the
-  ;; statecharts Fulcro integration and registers itself with the devtools Pathom parser only as a
-  ;; side effect of being loaded — nothing on this JVM connector path requires it, so load it now so
-  ;; the parser can answer the pull. (No-op/ignored if the app does not use statecharts.)
-  (try
-    (require 'com.fulcrologic.statecharts.integration.fulcro-impl)
-    (catch Throwable e
-      (log/warn e "inspect: could not load statecharts devtools integration; the Statecharts viewer will be empty")))
   (it/add-fulcro-inspect! app)
-  ;; The Statecharts viewer's `:statechart/available-sessions` resolver (and Inspect's own
-  ;; history/state resolvers) look the app up in `target-impl/apps*` by app-id — but nothing on the
-  ;; JVM ever registers it there (the registry is populated by CLJS-only preload paths). Register it
-  ;; so the pull resolvers can find the running app's sessions/state.
-  (swap! timpl/apps* assoc (ic/app-uuid app) app)
-  (install-db-sync! app)
   app)
