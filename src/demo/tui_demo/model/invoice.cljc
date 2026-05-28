@@ -3,9 +3,11 @@
    babashka): NO server/datomic dependency. The `:invoice/all-invoices`
    source-attribute resolver lives server-side in `tui-demo.server.resolvers`."
   (:require
+    [com.fulcrologic.fulcro.raw.components :as rc]
     [com.fulcrologic.rad.attributes :refer [defattr]]
     [com.fulcrologic.rad.attributes-options :as ao]
-    [com.fulcrologic.rad.form-options :as fo]))
+    [com.fulcrologic.rad.form-options :as fo]
+    [com.fulcrologic.rad.report-options :as ro]))
 
 (defattr id :invoice/id :uuid
   {ao/identity? true
@@ -19,13 +21,15 @@
 
 (defattr customer :invoice/customer :ref
   {ao/target      :account/id
+   ro/column-EQL {:invoice/customer (rc/get-query (rc/nc [:account/id :account/name] {:componentName :invoice/customer-column-query}))}
+   ro/column-formatter (fn [_ v _ _] (:account/name v))
    ao/cardinality :one
-   ao/identities  #{:invoice/id}
-   ao/required?   true
-   ao/schema      :production})
+   ao/identities #{:invoice/id}
+   ao/required? true
+   ao/schema :production})
 
 (defattr line-items :invoice/line-items :ref
-  {ao/target      :line-item/id
+  {ao/target                                                       :line-item/id
    ao/cardinality :many
    ao/component?  true
    ao/identities  #{:invoice/id}

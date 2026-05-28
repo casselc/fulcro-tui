@@ -10,24 +10,22 @@
     [tui-demo.ui.invoice-form :refer [InvoiceForm]]))
 
 (defsc-report InvoiceReport [this props]
-  {ro/title               "Invoices"
-   ro/source-attribute    :invoice/all-invoices
-   ro/row-pk              invoice/id
-   ro/columns             [invoice/customer invoice/date invoice/total]
-   ro/row-query-inclusion [{:invoice/customer [:account/id :account/name]}]
-   ro/column-formatters   {:invoice/customer (fn [_ v _ _] (:account/name v))
-                           :invoice/total    (fn [_ v _ _] (str "$" (math/numeric->str (or v (math/zero)))))}
-   ro/form-links          {:invoice/total InvoiceForm}
-   ro/row-actions         [{:label  "Edit"
-                            :action (fn [report-instance {:invoice/keys [id]}]
-                                      (form/edit! report-instance InvoiceForm id))}]
-   ro/controls            {::new {:type     :button
-                                  :local?   true
-                                  :label    "New Invoice"
-                                  :shortcut [:alt "c"]
-                                  :action   (fn [report-instance] (form/create! report-instance InvoiceForm))}}
-   ro/control-layout      {:action-buttons [::new]}
-   ro/paginate?           true
-   ro/page-size           40
-   ro/run-on-mount?       true
-   ro/route               "invoices"})
+  {ro/title             "Invoices"
+   ro/source-attribute  :invoice/all-invoices
+   ro/row-pk            invoice/id
+   ro/columns           [invoice/customer invoice/date invoice/total]
+   ro/column-formatters {:invoice/total (fn [_ v _ _] (str "$" (math/numeric->str (or v (math/zero)))))}
+   ro/form-links        {:invoice/total InvoiceForm}
+   ro/row-actions       [{:label  "Edit"
+                          :action (fn [report-instance {:invoice/keys [id]}]
+                                    (form/edit! report-instance InvoiceForm id))}]
+   ro/controls          {::new {:type     :button
+                                :local?   true
+                                :label    "New Invoice"
+                                :shortcut [:alt "c"]
+                                :action   (fn [report-instance] (form/create! report-instance InvoiceForm))}}
+   ro/control-layout    {:action-buttons [::new]}
+   ro/paginate?         true
+   ro/page-size         40
+   ro/run-on-mount?     true
+   ro/route             "invoices"})
