@@ -50,6 +50,16 @@
                      (fn [{:fulcro/keys [app]} _data _form-ident]
                        (po/load-options! app LineItemForm {} line-item/category)
                        nil)
+                     ;; On EDIT, each existing line item already has a category, but its item picker's
+                     ;; options are category-scoped and only load on a category CHANGE (the `:on-change`
+                     ;; cascade). Without this the saved item can't be matched to an option, so the field
+                     ;; shows "(choose)". After the invoice + line items load, load each line item's
+                     ;; category-scoped item options so the current item displays.
+                     :after-load
+                     (fn [{:fulcro/keys [app]} {:fulcro/keys [state-map]} form-ident]
+                       (doseq [li-ident (:invoice/line-items (get-in state-map form-ident))]
+                         (po/load-options! app LineItemForm (get-in state-map li-ident) line-item/item))
+                       nil)
                      :derive-fields
                      (fn [{:invoice/keys [line-items] :as invoice}]
                        (assoc invoice
