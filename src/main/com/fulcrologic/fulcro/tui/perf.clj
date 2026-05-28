@@ -121,7 +121,7 @@
 ;; Control
 ;; ===========================================================================
 
-(defn reset!
+(defn reset-stats!
   "Clears all accumulated stats and restarts the wall-clock bracket."
   []
   (clojure.core/reset! stats {})
@@ -131,7 +131,7 @@
 (defn start!
   "Enables profiling and clears prior stats. Call before exercising the code to measure."
   []
-  (reset!)
+  (reset-stats!)
   (vreset! on? true)
   nil)
 

@@ -27,10 +27,8 @@
    item-to-item (in `engine/process-key!`) and `follow-focus!` autoscrolls to track the focused item."
   (:require
     [clojure.spec.alpha :as s]
-    [com.fulcrologic.fulcro.algorithms.denormalize :as fdn]
     [com.fulcrologic.fulcro.algorithms.tx-processing.synchronous-tx-processing :as stx]
     [com.fulcrologic.fulcro.raw.application :as rapp]
-    [com.fulcrologic.fulcro.raw.components :as rc]
     [com.fulcrologic.fulcro.tui.elements :as elements]
     [com.fulcrologic.fulcro.tui.engine :as engine]
     [com.fulcrologic.fulcro.tui.perf :as perf :refer [p]]
@@ -317,66 +315,75 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
       ;; terminal's resize handler fires on JLine's signal thread — both call `render!`, and they must
       ;; not interleave their writes to the terminal or the cached prev-buffer/placed-tree.
       (p `render! (locking terminal
-        (let [;; `engine/current-node-tree` computes the pure node tree from state (root class +
-              ;; `db->tree` + `render-root`, with the focus var bound) AND memoizes it in the runtime
-              ;; atom keyed on state-map identity. Sharing it with `process-key!` means a keystroke
-              ;; that only moves focus does not build the whole tree twice (once to resolve the focus
-              ;; ring, once to paint) — the second consumer reuses the first's tree.
-              full-tree      (p `render-root (engine/current-node-tree app))
-              ;; Overlays (open `:modal` nodes) are composited on top of the base UI; the base is
-              ;; laid out from the tree with all modals stripped, and the topmost overlay is placed
-              ;; into its own screen window. Focus/cursor/scroll track the active layer.
-              base-tree      (engine/strip-overlays full-tree)
-              overlay        (peek (engine/collect-overlays full-tree))
-              {:keys [rows cols]} (term/t-size terminal)
-              {:keys [min-width min-height]} (root-min base-tree)
-              too-small?     (or (< cols min-width) (< rows min-height))
-              screen         {:x 0 :y 0 :w cols :h rows}
-              base-placed    (p `layout
-                               (when-not too-small?
-                                 (inject-scroll app (engine/place base-tree screen))))
-              overlay-placed (p `layout
-                               (when (and (not too-small?) overlay)
-                                 (inject-scroll app (engine/place overlay (engine/overlay-window-rect overlay screen)))))
-              active-placed  (or overlay-placed base-placed)
-              buf            (p `paint
-                               ;; `*enhanced-keys?*` gates mnemonic-underline rendering: hints are
-                               ;; painted only when the enhanced keyboard protocol is active.
-                               (binding [engine/*enhanced-keys?* (term/t-enhanced-keys? terminal)]
-                                 (if too-small?
-                                   (too-small-buffer rows cols min-width min-height)
-                                   (cond-> (engine/render-buffer base-placed rows cols)
-                                     overlay-placed (engine/paint overlay-placed screen)))))
-              last-size      (::last-size rt)
-              size           {:rows rows :cols cols}
-              resized?       (boolean (and last-size (not= last-size size)))
-              ;; A `redraw!` request (e.g. Ctrl-L) forces a clear + full repaint to recover a screen
-              ;; corrupted by stray output (a rogue log line, another process writing to the tty…).
-              force-redraw?  (boolean (::force-redraw? rt))
-              full-repaint?  (or resized? force-redraw?)
-              prev           (when-not full-repaint? (::prev-buffer rt))
-              ;; On a resize/forced redraw the whole screen is repainted from scratch (`:clear?`): a
-              ;; plain full repaint only writes non-blank cells, so without clearing, stale content
-              ;; (from the old size, or stray output) would linger on screen.
-              ansi           (p `serialize
-                               (engine/frame->ansi prev buf {:sync?  (term/t-sync-supported? terminal)
-                                                             :clear? full-repaint?}))]
-          (p `write (term/t-write! terminal ansi))
-          ;; Position the cursor AFTER the frame's drawing and flush once, so the cursor-move is
-          ;; the last terminal command of the frame (otherwise the diff's writes leave the hardware
-          ;; cursor wherever drawing ended, making the visible caret lag a frame on a real terminal).
-          (p `cursor
-            (when active-placed
-              (position-cursor! app terminal active-placed))
-            (when (and too-small? (nil? active-placed))
-              (term/t-set-cursor! terminal 0 0 false)))
-          (p `flush (term/t-flush! terminal))
-          (swap! (runtime-atom-key app) assoc
-            ::prev-buffer buf
-            ::placed active-placed
-            ::last-size size
-            ::force-redraw? false)
-          app))))))
+                    (let [;; `engine/current-node-tree` computes the pure node tree from state (root class +
+                          ;; `db->tree` + `render-root`, with the focus var bound) AND memoizes it in the runtime
+                          ;; atom keyed on state-map identity. Sharing it with `process-key!` means a keystroke
+                          ;; that only moves focus does not build the whole tree twice (once to resolve the focus
+                          ;; ring, once to paint) — the second consumer reuses the first's tree.
+                          ;;
+                          ;; `*enhanced-keys?*` (stable; set once at terminal negotiation) MUST be bound around
+                          ;; the tree build, because the UI reads it there to render shortcut mnemonics / the
+                          ;; ON/OFF status. The input loop binds it while dispatching keys, but renders driven
+                          ;; off that thread (the throttled daemon repaint, resize) would otherwise build the
+                          ;; tree with the default `false` — making the status flicker and dropping mnemonics.
+                          full-tree      (p `render-root
+                                           (binding [engine/*enhanced-keys?* (term/t-enhanced-keys? terminal)]
+                                             (engine/current-node-tree app)))
+                          ;; Overlays (open `:modal` nodes) are composited on top of the base UI; the base is
+                          ;; laid out from the tree with all modals stripped, and the topmost overlay is placed
+                          ;; into its own screen window. Focus/cursor/scroll track the active layer.
+                          base-tree      (engine/strip-overlays full-tree)
+                          overlay        (peek (engine/collect-overlays full-tree))
+                          {:keys [rows cols]} (term/t-size terminal)
+                          {:keys [min-width min-height]} (root-min base-tree)
+                          too-small?     (or (< cols min-width) (< rows min-height))
+                          screen         {:x 0 :y 0 :w cols :h rows}
+                          base-placed    (p `layout
+                                           (when-not too-small?
+                                             (inject-scroll app (engine/place base-tree screen))))
+                          overlay-placed (p `layout
+                                           (when (and (not too-small?) overlay)
+                                             (inject-scroll app (engine/place overlay (engine/overlay-window-rect overlay screen)))))
+                          active-placed  (or overlay-placed base-placed)
+                          buf            (p `paint
+                                           ;; `*enhanced-keys?*` also gates the mnemonic-underline paint
+                                           ;; in `internal-paint`, so bind it here too (the tree-build
+                                           ;; binding above does not extend to this paint step).
+                                           (binding [engine/*enhanced-keys?* (term/t-enhanced-keys? terminal)]
+                                             (if too-small?
+                                               (too-small-buffer rows cols min-width min-height)
+                                               (cond-> (engine/render-buffer base-placed rows cols)
+                                                 overlay-placed (engine/paint overlay-placed screen)))))
+                          last-size      (::last-size rt)
+                          size           {:rows rows :cols cols}
+                          resized?       (boolean (and last-size (not= last-size size)))
+                          ;; A `redraw!` request (e.g. Ctrl-L) forces a clear + full repaint to recover a screen
+                          ;; corrupted by stray output (a rogue log line, another process writing to the tty…).
+                          force-redraw?  (boolean (::force-redraw? rt))
+                          full-repaint?  (or resized? force-redraw?)
+                          prev           (when-not full-repaint? (::prev-buffer rt))
+                          ;; On a resize/forced redraw the whole screen is repainted from scratch (`:clear?`): a
+                          ;; plain full repaint only writes non-blank cells, so without clearing, stale content
+                          ;; (from the old size, or stray output) would linger on screen.
+                          ansi           (p `serialize
+                                           (engine/frame->ansi prev buf {:sync?  (term/t-sync-supported? terminal)
+                                                                         :clear? full-repaint?}))]
+                      (p `write (term/t-write! terminal ansi))
+                      ;; Position the cursor AFTER the frame's drawing and flush once, so the cursor-move is
+                      ;; the last terminal command of the frame (otherwise the diff's writes leave the hardware
+                      ;; cursor wherever drawing ended, making the visible caret lag a frame on a real terminal).
+                      (p `cursor
+                        (when active-placed
+                          (position-cursor! app terminal active-placed))
+                        (when (and too-small? (nil? active-placed))
+                          (term/t-set-cursor! terminal 0 0 false)))
+                      (p `flush (term/t-flush! terminal))
+                      (swap! (runtime-atom-key app) assoc
+                        ::prev-buffer buf
+                        ::placed active-placed
+                        ::last-size size
+                        ::force-redraw? false)
+                      app))))))
 
 (>defn request-render!
   "Requests a repaint of `app`, coalescing bursts into at most one render per throttle window.
@@ -645,7 +652,7 @@ Without the property the `perf/profile` wrapper compiles away entirely (zero ove
   ([app opts]
    [any? map? => ::handle]
    (perf/profile {}
-     (let [opts                            (merge {:max-fps 30} opts)
+     (let [opts (merge {:max-fps 30} opts)
            {:keys [^Thread thread] :as handle} (mount! app opts)]
        (.join thread)
        handle))))
@@ -680,6 +687,30 @@ if a transport does not, the loop ends on the next keypress/EOF instead."
       (try (term/t-leave! terminal) (catch Throwable _ nil)))
     (when thread (.interrupt thread))
     handle-or-app))
+
+(>defn redirect-logging-to-temp-file!
+  "Reconfigures Timbre so log output is written to a file instead of stdout/stderr — anything written
+to the controlling terminal while a TUI owns the screen corrupts the rendered frame. A TUI app should
+call this once at startup (NOT done automatically: headless tests `mount!` apps too and must not have
+their logging hijacked).
+
+With no arg, uses the `tui.log-file` system property if set, else a fresh temp file. Returns the
+`java.io.File` (so the caller can tell the user where to `tail` it), or `nil` if Timbre is unavailable
+(e.g. a stripped classpath). Disables Timbre's default `:println` appender and installs a `:spit`
+appender at the chosen path."
+  ([] [=> (? any?)] (redirect-logging-to-temp-file! (System/getProperty "tui.log-file")))
+  ([path]
+   [(? string?) => (? any?)]
+   (try
+     (let [merge-config! (requiring-resolve 'taoensso.timbre/merge-config!)
+           spit-appender (requiring-resolve 'taoensso.timbre.appenders.core/spit-appender)
+           ^java.io.File file (if path
+                                (java.io.File. ^String path)
+                                (java.io.File/createTempFile "fulcro-tui-" ".log"))]
+       (merge-config! {:appenders {:println {:enabled? false}
+                                   :spit    (spit-appender {:fname (.getAbsolutePath file)})}})
+       file)
+     (catch Throwable _ nil))))
 
 ;; ============================================================================
 ;; Application builder

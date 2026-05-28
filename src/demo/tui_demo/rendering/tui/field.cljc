@@ -18,6 +18,7 @@
     [com.fulcrologic.fulcro.mutations :as m]
     [com.fulcrologic.fulcro.raw.application :as rapp]
     [com.fulcrologic.fulcro.tui.elements :as e :refer [vbox hbox text input button viewport]]
+    [com.fulcrologic.fulcro.tui.engine :as engine]
     [com.fulcrologic.rad.attributes :as attr]
     [com.fulcrologic.rad.attributes-options :as ao]
     [com.fulcrologic.rad.control :as control]
@@ -59,19 +60,35 @@
     (when (ao/required? attribute) "*")))
 
 (defn- label-cell
-  "Renders the leading label column for a field, colored red and annotated with the validation message
-   when the field is currently invalid."
-  [{:keys [field-label invalid? validation-message]} qualified-key attribute]
+  "Renders the leading label column for a field, colored red when the field is currently invalid. The
+   validation MESSAGE is not shown here — `with-validation` renders it on its own row below the field."
+  [{:keys [field-label invalid?]} qualified-key attribute]
   (text {:width label-width :color (if invalid? :bright-red :cyan)}
-    (str (label-text field-label qualified-key attribute)
-      (when invalid? (str " (" validation-message ")")))))
+    (label-text field-label qualified-key attribute)))
+
+(defn- with-validation
+  "Wraps a field's primary `row` node. When the field is invalid, returns a `vbox` of the row followed
+   by a validation-message row (indented under the value column, in red); otherwise returns `row`
+   unchanged. Keeps messages off the label so fields stay aligned and readable."
+  [{:keys [invalid? validation-message]} row]
+  (if invalid?
+    (vbox {}
+      row
+      (hbox {:height 1}
+        (text {:width label-width} "")
+        (text {:color :bright-red} (str "↳ " (or validation-message "Invalid")))))
+    row))
 
 ;; ── Picker open/close state (one picker open at a time, kept in app state) ──────────────────────────
 
 (m/defmutation ^:private set-open-picker
-  "Records which picker (by node id) is currently open; `nil` closes all."
-  [{:keys [id]}]
-  (action [{:keys [state]}] (swap! state assoc ::open-picker id)))
+  "Records which picker (by node id) is currently open; `nil` closes all. When `focus` is supplied, also
+   moves keyboard focus to that node id — used on close to return focus to the picker's trigger button
+   (otherwise focus resets to the top of the form, since the focused modal option row just disappeared)."
+  [{:keys [id focus]}]
+  (action [{:keys [state]}]
+    (swap! state assoc ::open-picker id)
+    (when focus (swap! state assoc ::engine/focus focus))))
 
 (m/defmutation ^:private set-autocomplete-filter
   "Records the transient filter string typed into the autocomplete picker `id`."
@@ -84,7 +101,11 @@
   (= pick-id (get (rapp/current-state (comp/any->app form-instance)) ::open-picker)))
 
 (defn- open-picker! [form-instance pick-id] (comp/transact! form-instance [(set-open-picker {:id pick-id})]))
-(defn- close-picker! [form-instance] (comp/transact! form-instance [(set-open-picker {:id nil})]))
+(defn- close-picker!
+  "Closes any open picker. With `focus-id`, restores focus to that node (the trigger button) so focus
+   doesn't jump to the top of the form when the modal's focused option row disappears."
+  ([form-instance] (comp/transact! form-instance [(set-open-picker {:id nil})]))
+  ([form-instance focus-id] (comp/transact! form-instance [(set-open-picker {:id nil :focus focus-id})])))
 
 (defn- autocomplete-filter
   "The current transient filter string for autocomplete picker `pick-id` (\"\" if none)."
@@ -148,18 +169,19 @@
    (fn [{::rform/keys [form-instance] :as env} {::attr/keys [qualified-key] :as attribute}]
      (let [{:keys [value visible? read-only?] :as ctx} (form/field-context env attribute)]
        (when visible?
-         (hbox {:height (or (:height input-attrs) 1)}
-           (label-cell ctx qualified-key attribute)
-           (input (merge {:id        (field-node-id form-instance qualified-key "field")
-                          :grow      1
-                          :color     :bright-white
-                          :value     (value->string value)
-                          :on-change (fn [v & _]
-                                       (when-not read-only?
-                                         (let [model (string->model v)]
-                                           (m/set-value!! form-instance qualified-key model)
-                                           (form/input-changed! env qualified-key model))))}
-                    input-attrs))))))))
+         (with-validation ctx
+           (hbox {:height (or (:height input-attrs) 1)}
+             (label-cell ctx qualified-key attribute)
+             (input (merge {:id        (field-node-id form-instance qualified-key "field")
+                            :grow      1
+                            :color     :bright-white
+                            :value     (value->string value)
+                            :on-change (fn [v & _]
+                                         (when-not read-only?
+                                           (let [model (string->model v)]
+                                             (m/set-value!! form-instance qualified-key model)
+                                             (form/input-changed! env qualified-key model))))}
+                      input-attrs)))))))))
 
 (def render-string-field
   "Renders a :string attribute as a labelled text input."
@@ -190,19 +212,20 @@
                   (inst? value) (dt/inst->html-date value)
                   :else "")]
     (when visible?
-      (hbox {:height 1}
-        (label-cell ctx qualified-key attribute)
-        (input {:id        (field-node-id form-instance qualified-key "field")
-                :grow      1
-                :color     :bright-white
-                :value     display
-                :on-change (fn [v & _]
-                             (when-not read-only?
-                               (let [model (if (re-matches #"\d{4}-\d{2}-\d{2}" (str/trim (or v "")))
-                                             (dt/html-date->inst (str/trim v))
-                                             v)]
-                                 (m/set-value!! form-instance qualified-key model)
-                                 (form/input-changed! env qualified-key model))))})))))
+      (with-validation ctx
+        (hbox {:height 1}
+          (label-cell ctx qualified-key attribute)
+          (input {:id        (field-node-id form-instance qualified-key "field")
+                  :grow      1
+                  :color     :bright-white
+                  :value     display
+                  :on-change (fn [v & _]
+                               (when-not read-only?
+                                 (let [model (if (re-matches #"\d{4}-\d{2}-\d{2}" (str/trim (or v "")))
+                                               (dt/html-date->inst (str/trim v))
+                                               v)]
+                                   (m/set-value!! form-instance qualified-key model)
+                                   (form/input-changed! env qualified-key model))))}))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Boolean field
@@ -214,16 +237,17 @@
   (let [{:keys [value visible? read-only?] :as ctx} (form/field-context env attribute)
         toggle-id (field-node-id form-instance qualified-key "bool")]
     (when visible?
-      (hbox {:height 1}
-        (label-cell ctx qualified-key attribute)
-        (button {:id          toggle-id
-                 :color       (if value :bright-green :bright-white)
-                 :highlight   (e/focused? toggle-id)
-                 :on-activate (fn [] (when-not read-only?
-                                       (let [nv (not value)]
-                                         (m/set-value!! form-instance qualified-key nv)
-                                         (form/input-changed! env qualified-key nv))))}
-          (str (if value " [x] " " [ ] ") (if value "Yes" "No")))))))
+      (with-validation ctx
+        (hbox {:height 1}
+          (label-cell ctx qualified-key attribute)
+          (button {:id          toggle-id
+                   :color       (if value :bright-green :bright-white)
+                   :highlight   (e/focused? toggle-id)
+                   :on-activate (fn [] (when-not read-only?
+                                         (let [nv (not value)]
+                                           (m/set-value!! form-instance qualified-key nv)
+                                           (form/input-changed! env qualified-key nv))))}
+            (str (if value " [x] " " [ ] ") (if value "Yes" "No"))))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Enum field (modal picker over enumerated labels)
@@ -241,22 +265,23 @@
         cur-lbl  (when value (str (get labels value (name value))))]
     (when visible?
       (vbox {}
-        (hbox {:height 1}
-          (label-cell ctx qualified-key attribute)
-          (button {:id          pick-id
-                   :color       :bright-magenta
-                   :highlight   (e/focused? pick-id)
-                   :on-activate (fn [] (when-not read-only? (open-picker! form-instance pick-id)))}
-            (str " " (or cur-lbl "(choose)") " ▾")))
+        (with-validation ctx
+          (hbox {:height 1}
+            (label-cell ctx qualified-key attribute)
+            (button {:id          pick-id
+                     :color       :bright-magenta
+                     :highlight   (e/focused? pick-id)
+                     :on-activate (fn [] (when-not read-only? (open-picker! form-instance pick-id)))}
+              (str " " (or cur-lbl "(choose)") " ▾"))))
         (e/modal {:id (modal-id pick-id) :open? (picker-open? form-instance pick-id)
                   :title (label-text (:field-label ctx) qualified-key attribute)
-                  :width 40 :height 12 :on-dismiss (fn [] (close-picker! form-instance))}
+                  :width 40 :height 12 :on-dismiss (fn [] (close-picker! form-instance pick-id))}
           (option-list pick-id options
             (fn [v] (= v value))
             (fn [v]
               (m/set-value!! form-instance qualified-key v)
               (form/input-changed! env qualified-key v)
-              (close-picker! form-instance))))))))
+              (close-picker! form-instance pick-id))))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Ref pickers (to-one / to-many) — picker-options driven
@@ -289,22 +314,23 @@
         pick-id     (field-node-id form-instance qualified-key "pick")]
     (when visible?
       (vbox {}
-        (hbox {:height 1}
-          (label-cell ctx qualified-key attribute)
-          (button {:id          pick-id
-                   :color       :bright-magenta
-                   :highlight   (e/focused? pick-id)
-                   :on-activate (fn [] (when-not read-only? (open-picker! form-instance pick-id)))}
-            (str " " (or current-lbl "(choose)") " ▾")))
+        (with-validation ctx
+          (hbox {:height 1}
+            (label-cell ctx qualified-key attribute)
+            (button {:id          pick-id
+                     :color       :bright-magenta
+                     :highlight   (e/focused? pick-id)
+                     :on-activate (fn [] (when-not read-only? (open-picker! form-instance pick-id)))}
+              (str " " (or current-lbl "(choose)") " ▾"))))
         (e/modal {:id (modal-id pick-id) :open? (picker-open? form-instance pick-id)
                   :title (str "Select " (label-text (:field-label ctx) qualified-key attribute))
-                  :width 50 :height 14 :on-dismiss (fn [] (close-picker! form-instance))}
+                  :width 50 :height 14 :on-dismiss (fn [] (close-picker! form-instance pick-id))}
           (option-list pick-id options
             (fn [v] (= v current-val))
             (fn [v]
               (m/set-value!! form-instance qualified-key v)
               (form/input-changed! env qualified-key v)
-              (close-picker! form-instance))))))))
+              (close-picker! form-instance pick-id))))))))
 
 (defn render-ref-pick-many
   "Renders a to-many `:ref` field. The current selections are shown as a list; a button opens a modal
@@ -320,19 +346,20 @@
                             (vec s)))]
     (when visible?
       (vbox {}
-        (hbox {:height 1}
-          (label-cell ctx qualified-key attribute)
-          (button {:id          pick-id
-                   :color       :bright-magenta
-                   :highlight   (e/focused? pick-id)
-                   :on-activate (fn [] (when-not read-only? (open-picker! form-instance pick-id)))}
-            (str " + Edit (" (count selected) ") ")))
+        (with-validation ctx
+          (hbox {:height 1}
+            (label-cell ctx qualified-key attribute)
+            (button {:id          pick-id
+                     :color       :bright-magenta
+                     :highlight   (e/focused? pick-id)
+                     :on-activate (fn [] (when-not read-only? (open-picker! form-instance pick-id)))}
+              (str " + Edit (" (count selected) ") "))))
         (when (seq selected)
           (vbox {}
             (mapv (fn [v] (text {:color :bright-white} (str "  • " (or (sel-label v) (str v))))) selected)))
         (e/modal {:id (modal-id pick-id) :open? (picker-open? form-instance pick-id)
                   :title (str "Select " (label-text (:field-label ctx) qualified-key attribute))
-                  :width 50 :height 14 :on-dismiss (fn [] (close-picker! form-instance))}
+                  :width 50 :height 14 :on-dismiss (fn [] (close-picker! form-instance pick-id))}
           (option-list pick-id options
             (fn [v] (contains? selected v))
             (fn [v]
@@ -370,16 +397,17 @@
                       all-options)]
     (when visible?
       (vbox {}
-        (hbox {:height 1}
-          (label-cell ctx qualified-key attribute)
-          (button {:id          pick-id
-                   :color       :bright-magenta
-                   :highlight   (e/focused? pick-id)
-                   :on-activate (fn [] (when-not read-only? (open-picker! form-instance pick-id)))}
-            (str " " (or current-lbl "(choose)") " ▾")))
+        (with-validation ctx
+          (hbox {:height 1}
+            (label-cell ctx qualified-key attribute)
+            (button {:id          pick-id
+                     :color       :bright-magenta
+                     :highlight   (e/focused? pick-id)
+                     :on-activate (fn [] (when-not read-only? (open-picker! form-instance pick-id)))}
+              (str " " (or current-lbl "(choose)") " ▾"))))
         (e/modal {:id (modal-id pick-id) :open? (picker-open? form-instance pick-id)
                   :title (str "Find " (label-text (:field-label ctx) qualified-key attribute))
-                  :width 50 :height 14 :on-dismiss (fn [] (close-picker! form-instance))}
+                  :width 50 :height 14 :on-dismiss (fn [] (close-picker! form-instance pick-id))}
           (vbox {:grow 1}
             (hbox {:height 1}
               (text {:width 8 :color :cyan} "Filter:")
@@ -396,7 +424,7 @@
                 (m/set-value!! form-instance qualified-key v)
                 (form/input-changed! env qualified-key v)
                 (comp/transact! form-instance [(set-autocomplete-filter {:id pick-id :s ""})])
-                (close-picker! form-instance)))))))))
+                (close-picker! form-instance pick-id)))))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Controls (control type->style->control) — report/form filter & action controls
@@ -425,7 +453,7 @@
   "Renders a `:string` control as a labelled `input`. Edits call the control's `:onChange` (after
    storing the value via `control/set-parameter!`)."
   [{:keys [instance control-key control]}]
-  (let [{:keys [label onChange placeholder visible?]} control
+  (let [{:keys [label onChange visible?]} control
         label    (?! label instance)
         visible? (or (nil? visible?) (?! visible? instance))
         value    (control/current-value instance control-key)]
@@ -435,7 +463,7 @@
         (input {:id        (keyword "control" (name control-key))
                 :grow      1
                 :color     :bright-white
-                :value     (value->string (or value placeholder))
+                :value     (value->string value)
                 :on-change (fn [v & _]
                              (control/set-parameter! instance control-key v)
                              (when onChange (onChange instance v)))})))))

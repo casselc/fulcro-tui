@@ -21,12 +21,24 @@
 
 (def CategoryQuery
   "Normalizing query component for category picker options (loads into `:category/id`)."
-  (rc/nc [:category/id :category/label] {:ident :category/id :componentName ::CategoryQuery}))
+  (rc/nc [:category/id :category/label] {:componentName ::CategoryQuery}))
 
 (def ItemQuery
   "Normalizing query component for item picker options (loads into `:item/id`)."
   (rc/nc [:item/id :item/name :item/price {:item/category [:category/id]}]
-    {:ident :item/id :componentName ::ItemQuery}))
+    {:componentName ::ItemQuery}))
+
+(defn- category-id
+  "Extracts the `:category/id` uuid from a `:line-item/category` value. The value is a denormalized
+   `{:category/id id}` map when read from a form instance's props, but a bare `[:category/id id]` ident
+   when read from the raw state-map (e.g. inside an `:on-change` trigger). Both must yield the same id
+   so the dependent item picker's cache-key/query-parameters match between the trigger's load and the
+   renderer's read."
+  [category]
+  (cond
+    (map? category)    (:category/id category)
+    (vector? category) (second category)
+    :else              nil))
 
 (defsc-form LineItemForm [this props]
   {fo/id            line-item/id
@@ -45,11 +57,14 @@
                      :line-item/item
                      {po/query-key        :item/all-items
                       po/query-component  ItemQuery
-                      ;; Cache per selected category so switching categories re-queries.
+                      ;; Cache per selected category so switching categories re-queries. `category` may be
+                      ;; a denormalized map (renderer) or a bare ident (trigger) — `category-id` handles both.
                       po/cache-key        (fn [_ {:line-item/keys [category]}]
                                             (keyword "item-list"
-                                              (or (some-> category :category/id str) "all")))
-                      po/query-parameters (fn [_ _ {:line-item/keys [category]}] category)
+                                              (or (some-> (category-id category) str) "all")))
+                      po/query-parameters (fn [_ _ {:line-item/keys [category]}]
+                                            (when-let [cid (category-id category)]
+                                              {:category/id cid}))
                       po/options-xform    (fn [_ options]
                                             (mapv (fn [{:item/keys [id name price]}]
                                                     {:text  (str name " - $" (math/numeric->str price))
@@ -66,9 +81,13 @@
                      (fn [{:fulcro/keys [app]} {:fulcro/keys [state-map]} form-ident k _old new-value]
                        (case k
                          ;; Picking a category re-scopes the item picker and clears the stale item.
+                         ;; `:on-change` ops are computed from the PRE-mutation state-map, so the new category
+                         ;; isn't stored yet — inject `new-value` into the props we hand `load-options!` so the
+                         ;; item picker loads/caches under the just-picked category (matching what the renderer,
+                         ;; reading post-mutation props, will look up).
                          :line-item/category
                          (let [cls   (rc/registry-key->class ::LineItemForm)
-                               props (get-in state-map form-ident)]
+                               props (assoc (get-in state-map form-ident) :line-item/category new-value)]
                            (po/load-options! app cls props line-item/item)
                            [(fops/apply-action update-in form-ident dissoc :line-item/item)])
                          ;; Picking an item copies its catalog price into the quoted price.

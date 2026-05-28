@@ -10,19 +10,25 @@
     [com.fulcrologic.rad.picker-options :as po]
     [com.fulcrologic.rad.report-options :as ro]
     [com.fulcrologic.rad.statechart.form :as form :refer [defsc-form]]
+    [com.fulcrologic.rad.statechart.form-options :as sfo]
     [com.fulcrologic.rad.statechart.report :as report :refer [defsc-report]]
     [com.fulcrologic.rad.type-support.decimal :as math]
+    [com.fulcrologic.statecharts.integration.fulcro.routing :as scr]
     [tui-demo.model.category :as category]
     [tui-demo.model.item :as item]))
 
+(def report-route
+  "Registry keyword of the inventory report (route target after save/cancel)."
+  :tui-demo.ui.item-forms/InventoryReport)
+
 (def CategoryQuery
   "Normalizing query component for category picker options."
-  (rc/nc [:category/id :category/label] {:ident :category/id :componentName ::CategoryQuery}))
+  (rc/nc [:category/id :category/label] {:componentName ::CategoryQuery}))
 
 (defsc-form ItemForm [this props]
   {fo/id            item/id
    fo/title         "Edit Item"
-   fo/cancel-route  :tui-demo.ui.item-forms/InventoryReport
+   fo/cancel-route  report-route
    fo/attributes    [item/name item/category item/description item/in-stock item/price]
    fo/field-styles  {:item/category :pick-one
                      :item/description :multi-line}
@@ -36,7 +42,12 @@
                       po/cache-time-ms   30000}}
    fo/layout        [[:item/name :item/category]
                      [:item/description]
-                     [:item/in-stock :item/price]]})
+                     [:item/in-stock :item/price]]
+   ;; After a successful save, return to the report (on-saved doesn't navigate on its own).
+   sfo/triggers     {:saved
+                     (fn [{:fulcro/keys [app]} _data _form-ident]
+                       (scr/route-to! app report-route {})
+                       nil)}})
 
 (defsc-report InventoryReport [this props]
   {ro/title               "Inventory"
@@ -53,6 +64,14 @@
    ro/initial-sort-params {:sort-by          :item/name
                            :ascending?       true
                            :sortable-columns #{:item/name :category/label :item/price :item/in-stock}}
+   ;; The category label is nested under :item/category, so the default comparator (which reads the
+   ;; sort-by key directly off the row) would sort on the raw ident. Resolve the nested label here.
+   ro/compare-rows        (fn [{:keys [sort-by ascending?]} a b]
+                            (let [row-val (fn [row] (if (= sort-by :category/label)
+                                                      (get-in row [:item/category :category/label])
+                                                      (get row sort-by)))
+                                  c       (try (compare (row-val a) (row-val b)) (catch Throwable _ 0))]
+                              (if ascending? c (- c))))
    ro/form-links          {item/name ItemForm}
    ro/controls            {::category {:type             :picker
                                        :local?           true

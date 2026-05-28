@@ -8,7 +8,6 @@
   (:require
     [clojure.string :as str]
     [com.fulcrologic.fulcro.components :as comp]
-    [com.fulcrologic.rad.control :as control]
     [com.fulcrologic.rad.form-options :as fo]
     [com.fulcrologic.rad.report-options :as ro]
     [com.fulcrologic.rad.statechart.form :as form :refer [defsc-form]]
@@ -73,20 +72,20 @@
                                             :local?        false
                                             :default-value false
                                             :label         "Show inactive?"
-                                            :onChange      (fn [this _] (control/run! this))}}
+                                            :onChange      (fn [this _] (report/run-report! this))}}
    ro/control-layout      {:action-buttons [::new]
                            :inputs         [[::filter-name] [:show-inactive?]]}
    ro/row-actions         [{:label     "Enable"
                             :action    (fn [report-instance {:account/keys [id]}]
                                          (comp/transact! report-instance
                                            [(account/set-account-active {:account/id id :account/active? true})])
-                                         (control/run! report-instance))
+                                         (report/run-report! report-instance))
                             :disabled? (fn [_ row] (:account/active? row))}
                            {:label     "Disable"
                             :action    (fn [report-instance {:account/keys [id]}]
                                          (comp/transact! report-instance
                                            [(account/set-account-active {:account/id id :account/active? false})])
-                                         (control/run! report-instance))
+                                         (report/run-report! report-instance))
                             :disabled? (fn [_ row] (not (:account/active? row)))}]
    ro/run-on-mount?       true
    ro/route               "accounts"})

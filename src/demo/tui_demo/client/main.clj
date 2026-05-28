@@ -22,8 +22,7 @@
 (def AccountOption
   "A normalizing component for loading the account picker options into the `:account/id` table."
   (rc/nc [:account/id :account/name]
-    {:ident         (fn [_ props] [:account/id (:account/id props)])
-     :componentName ::AccountOption}))
+    {:componentName ::AccountOption}))
 
 (defn new-app
   "Builds and wires the demo client app (no terminal attached yet). `base-url` is the
@@ -48,10 +47,17 @@
     app))
 
 (defn -main [& _args]
-  ;; Statecharts log at DEBUG very verbosely; keep the terminal clean.
-  (log/merge-config! {:min-level :warn})
-  ;; RAD's instant formatters resolve against a bound timezone; without one they NPE (blank dates).
-  (dt/set-timezone! "America/Los_Angeles")
-  (let [app (new-app "http://localhost:3001")]
-    (scr/route-to! app InvoiceReport)
-    (tui-app/run-blocking! app)))
+  ;; Logs to stdout would corrupt the TUI frame; send them to a temp file instead. Statecharts also
+  ;; log very verbosely at DEBUG, so keep the file readable at :info.
+  (let [logfile (tui-app/redirect-logging-to-temp-file!)]
+    (log/merge-config! {:min-level :info})
+    (when logfile (binding [*out* *err*] (println "Logging to" (.getAbsolutePath logfile))))
+    ;; RAD's instant formatters resolve against a bound timezone; without one they NPE (blank dates).
+    (dt/set-timezone! "America/Los_Angeles")
+    (let [app (new-app "http://localhost:3001")]
+      (scr/route-to! app InvoiceReport)
+      (tui-app/run-blocking! app))
+    ;; The input loop has ended (Ctrl-Q / EOF). Background threads (remote HTTP client, core.async
+    ;; dispatch, Inspect socket) are non-daemon and would keep the JVM alive, so exit explicitly.
+    (shutdown-agents)
+    (System/exit 0)))

@@ -12,6 +12,7 @@
     [com.fulcrologic.rad.type-support.decimal :as math]
     [com.fulcrologic.statecharts.integration.fulcro.routing :as scr]
     [tui-demo.model.invoice :as invoice]
+    [tui-demo.model.line-item :as line-item]
     [tui-demo.ui.line-item-form :refer [LineItemForm]]))
 
 (def report-route
@@ -30,7 +31,7 @@
    fo/field-styles  {:invoice/customer :pick-one}
    fo/field-options {:invoice/customer
                      {po/query-key       :account/all-accounts
-                      po/query-component (rc/nc [:account/id :account/name] {:ident :account/id})
+                      po/query-component (rc/nc [:account/id :account/name] {:componentName ::CustomerQuery})
                       po/options-xform   (fn [_ accounts]
                                            (mapv (fn [{:account/keys [id name]}]
                                                    {:text name :value [:account/id id]})
@@ -41,7 +42,15 @@
    fo/layout        [[:invoice/customer :invoice/date]
                      [:invoice/line-items]
                      [:invoice/total]]
-   sfo/triggers     {:derive-fields
+   sfo/triggers     {;; Subform charts don't run — only the master's does — so the per-form picker-option
+                     ;; loader never fires for the LineItem subform. Load its (category-independent)
+                     ;; category picker options here when the invoice form starts; the item picker is
+                     ;; category-dependent and loads via the LineItemForm `:on-change` cascade.
+                     :started
+                     (fn [{:fulcro/keys [app]} _data _form-ident]
+                       (po/load-options! app LineItemForm {} line-item/category)
+                       nil)
+                     :derive-fields
                      (fn [{:invoice/keys [line-items] :as invoice}]
                        (assoc invoice
                          :invoice/total (reduce (fn [acc {:line-item/keys [subtotal]}]
