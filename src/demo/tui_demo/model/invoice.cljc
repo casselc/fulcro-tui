@@ -1,6 +1,6 @@
 (ns tui-demo.model.invoice
   "RAD attributes for the `invoice` entity. CLJC and fully client-safe (loads under
-   babashka): NO server/datascript dependency. The `:invoice/all-invoices`
+   babashka): NO server/datomic dependency. The `:invoice/all-invoices`
    source-attribute resolver lives server-side in `tui-demo.server.resolvers`."
   (:require
     [com.fulcrologic.rad.attributes :refer [defattr]]
@@ -30,7 +30,8 @@
    ao/component?  true
    ao/identities  #{:invoice/id}
    ao/required?   true
-   ao/schema      :production})
+   ao/schema      :production
+   :com.fulcrologic.rad.database-adapters.datomic/attribute-schema {:db/isComponent true}})
 
 (defattr total :invoice/total :decimal
   {ao/identities #{:invoice/id}

@@ -73,18 +73,29 @@ and a self-time report prints after you quit. See the link:Guide.adoc[Guide]'s _
 
 == A full-stack RAD demo (server + statecharts + Datascript)
 
-`src/demo` is a second, larger example: a https://github.com/fulcrologic/fulcro-rad[Fulcro RAD]
-*report → form* combo — an invoice list that opens an editable invoice form with a to-many line-item
-subform — driven entirely by https://github.com/fulcrologic/statecharts[statecharts] (routing plus the
-RAD report/form engines), talking to a server over a standard Fulcro *transit* `/api`. It exercises a
-real cross-section of a Fulcro app against the terminal renderer, and runs the client on the JVM *or*
+`src/demo` is a second, larger example: a full https://github.com/fulcrologic/fulcro-rad[Fulcro RAD]
+commerce app — three interlinked *reports* (Invoices, Accounts, Inventory) and their edit *forms*,
+driven entirely by https://github.com/fulcrologic/statecharts[statecharts] (routing plus the RAD
+report/form engines), talking to a server over a standard Fulcro *transit* `/api`. It exercises a real
+cross-section of a Fulcro app against the terminal renderer, and runs the client on the JVM *or*
 babashka.
+
+The RAD rendering plugin (`tui-demo.rendering.tui.*`) covers the full control contract as terminal
+widgets: string / int / decimal / multi-line / instant (date) fields; `:boolean` `[x]`/`[ ]` toggles;
+`:enum` and to-one / to-many `:ref` *modal pickers* (server-loaded via `picker-options`, with a
+type-to-filter autocomplete variant); required-field `*` markers and inline validation; component
+subforms (e.g. an account's addresses); sortable report column headers and client-side
+`row-visible?` filtering; and report controls (buttons, text filters, boolean toggles, server-backed
+picker filters). Dependent pickers work too — choosing a line-item's category rescopes its item
+picker and copies the item's price into the quoted price.
 
 Architecture (two tiers, under `src/demo/tui_demo/`):
 
-* *Server* (JVM): an in-memory https://github.com/tonsky/datascript[Datascript] database behind a
-  Pathom 2 parser and a small hand-written RAD Datascript driver, served at `/api` (http-kit + Fulcro's
-  transit middleware). `tui_demo.server.*`.
+* *Server* (JVM only): an in-memory https://docs.datomic.com/datomic-local.html[Datomic Local] database
+  (`:dev-local`, `:storage-dir :mem`) behind a Pathom 2 parser, using the well-tested
+  `fulcro-rad-datomic` (datomic-cloud) adapter for schema/resolvers/save/delete, served at `/api`
+  (http-kit + Fulcro's transit middleware). `tui_demo.server.*`. (Datomic Local does not run under
+  babashka, so the server is JVM-only; the babashka client talks to it over HTTP.)
 * *Client* (JVM or babashka): the fulcro-tui app + RAD `defsc-report`/`defsc-form` + statechart routing,
   rendered by a small RAD UI plugin that maps reports/forms to terminal elements (installed with
   `install-ui-controls!`, modeled on the semantic-ui plugin). A synchronous transit HTTP remote
@@ -95,14 +106,24 @@ Run it — start the server, then the client (in a second terminal):
 
 [source,bash]
 ----
-clojure -M:demo-server      # JVM: Datascript + transit /api on :3001
-clojure -M:demo             # JVM client …
-bb run demo                 # … or the babashka client (same JVM server)
+bb server                   # terminal 1 — JVM: Datomic Local (in-memory) + transit /api on :3001
+                            #   (shells `clojure -M:demo-server`; Datomic Local is JVM-only)
+bb demo                     # terminal 2 — babashka client …
+clojure -M:demo             #   … or the JVM client (same server)
 ----
 
-The report lists invoices (customer, date, total); *Tab* / *arrows* move the row highlight, *Enter*
-opens the invoice in an edit form (pick-one customer, date, an editable line-item subform with *Add*),
-and saving persists back to Datascript through the transit API. *Ctrl-Q* quits.
+A top nav bar switches between the three reports (*Alt-1/2/3*, or *Tab* to a nav button + *Enter*).
+The Invoices report opens an invoice edit form (pick-one customer modal, date field, an editable
+line-item subform with dependent category→item pickers and auto-filled price). The Accounts report has
+a name filter, a "show inactive" toggle (server re-query), sortable columns, Enable/Disable row
+actions, and an account form with a role enum, an active? toggle, and address component subforms. The
+Inventory report has a server-backed category picker filter and sortable columns. Saving persists back
+to Datomic through the transit API. *Ctrl-Q* quits.
+
+Tests (JVM, Datomic) live in `src/demo-test`: server/model round-trips *and* full-stack headless
+*rendering* tests (a real client app wired to the Pathom parser through an in-process loopback remote,
+driven via a `string-terminal` and asserted on the painted screen). Run them with
+`clojure -M:demo-server:test:demo-test`.
 
 NOTE: this demo pulls cutting-edge releases of fulcro, statecharts, fulcro-rad and
 fulcro-rad-statecharts (see the `:demo` / `:demo-server` aliases in `deps.edn` and the `demo` task in

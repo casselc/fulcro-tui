@@ -66,6 +66,11 @@
 ;; Pure key decoder (testable WITHOUT JLine)
 ;; =============================================================================
 
+(def ^:private cp->special-key
+  "Control code points that must decode to a keyword key (not their literal text char), shared by the
+   raw decoder and the CSI-u decoder so modified forms (e.g. Shift-Tab as `9;2u`) yield `:tab`."
+  {9 :tab, 13 :enter, 10 :enter, 27 :escape, 8 :backspace, 127 :backspace})
+
 (>defn- ctrl-letter
   "Returns the lowercase letter string for a control code `n` in 1..26 (1 -> \"a\" .. 26 -> \"z\")."
   [n]
@@ -137,12 +142,18 @@ nil `:char`, matching the legacy control-code decoding."
                                 (or (read-decimal (subvec after-cp 1)) [nil after-cp])
                                 [1 after-cp])]
         (when (and mods (seq after-mods) (= (int (first after-mods)) 117)) ; 'u'
-          (let [bits   (dec mods)
-                ctrl?  (pos? (bit-and bits 4))
-                alt?   (pos? (bit-and bits 2))
-                shift? (pos? (bit-and bits 1))
-                s      (String. (Character/toChars cp))]
-            [(key-event s {:char   (when-not (or ctrl? alt?) s)
+          (let [bits     (dec mods)
+                ctrl?    (pos? (bit-and bits 4))
+                alt?     (pos? (bit-and bits 2))
+                shift?   (pos? (bit-and bits 1))
+                ;; Control codepoints (tab/enter/escape/backspace) must decode to their KEYWORD key
+                ;; (e.g. :tab), exactly as `decode-key` does for the raw bytes — otherwise modified
+                ;; forms like Shift-Tab (`9;2u`) would arrive as the string "\t" and miss the
+                ;; engine's `(= k :tab)` focus-nav check. Other codepoints stay as their text string.
+                special  (get cp->special-key cp)
+                s        (String. (Character/toChars cp))
+                k        (or special s)]
+            [(key-event k {:char   (when (and (not special) (not (or ctrl? alt?))) s)
                            :ctrl?  ctrl?
                            :alt?   alt?
                            :shift? shift?

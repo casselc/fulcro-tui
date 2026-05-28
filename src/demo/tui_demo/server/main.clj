@@ -1,6 +1,6 @@
 (ns tui-demo.server.main
-  "Entry point for the demo server: seeds a Datascript DB, installs it on the
-   parser, and starts the http-kit `/api` server."
+  "Entry point for the demo server: seeds an in-memory Datomic Local DB, installs it
+   on the parser, and starts the http-kit `/api` server."
   (:require
     [tui-demo.server.http :as http]
     [tui-demo.server.parser :as parser]

@@ -28,14 +28,22 @@
                :task     (tui-example.form/-main)}
 
          ;; ---------------------------------------------------------------------
+         ;; Full-stack RAD + statechart demo SERVER (see src/demo). Datomic Local is JVM-only and
+         ;; will NOT run under babashka, so this task shells out to the JVM Clojure CLI rather than
+         ;; running in-process. Two-terminal demo: `bb server` here, `bb demo` in another terminal.
+         ;; ---------------------------------------------------------------------
+         server {:doc  "Start + seed the JVM demo server on :3001 (shells `clojure -M:demo-server`)."
+                 :task (clojure "-M:demo-server")}
+
+         ;; ---------------------------------------------------------------------
          ;; Full-stack RAD + statechart demo CLIENT (see src/demo). Talks transit HTTP to the
-         ;; JVM demo server, which you must start first:  clojure -M:demo-server   (port 3001).
+         ;; JVM demo server, which you must start first:  bb server   (port 3001).
          ;; All published mvn versions (each carries the babashka-compat fixes). fulcro comes from
          ;; the top-level :deps (3.10.0-RC2). clojurescript/spec.alpha are excluded (pure clj/bb
          ;; client; they clash with SCI); statecharts is excluded from rad-statecharts so the
          ;; explicit RC18 wins.
          ;; ---------------------------------------------------------------------
-         demo {:doc         "Run the full-stack RAD/statechart demo client (needs `clojure -M:demo-server` on :3001)."
+         demo {:doc         "Run the full-stack RAD/statechart demo client (needs `bb server` on :3001)."
                :extra-paths ["src/demo"]
                :extra-deps  {com.fulcrologic/statecharts            {:mvn/version "1.4.0-RC18"}
                              com.fulcrologic/fulcro-rad             {:mvn/version "1.6.24"}

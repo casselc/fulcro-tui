@@ -32,6 +32,30 @@
     (some-> qualified-key name str/capitalize)
     ""))
 
+(defn- sort-state
+  "Returns the report's current sort parameters map `{:sort-by k :ascending? bool :sortable-columns set}`."
+  [report-instance]
+  (get-in (comp/props report-instance) [:ui/parameters ::report/sort]))
+
+(defn- render-column-header
+  "Renders one column heading. Columns named in `:sortable-columns` render as a focusable button that
+   toggles the report sort (an ▲/▼ arrow marks the active sort column + direction); others render as
+   plain header text."
+  [report-instance {::attr/keys [qualified-key] :as column}]
+  (let [{:keys [sort-by ascending? sortable-columns]} (sort-state report-instance)
+        sortable? (contains? (set sortable-columns) qualified-key)
+        active?   (= sort-by qualified-key)
+        arrow     (cond (not active?) "" ascending? " ▲" :else " ▼")
+        label     (str (column-label report-instance column) arrow)]
+    (if sortable?
+      (let [hid (keyword "sorth" (str (namespace qualified-key) "_" (name qualified-key)))]
+        (button {:id          hid :width col-width :bold true
+                 :color       (if active? :bright-yellow :bright-cyan)
+                 :highlight   (e/focused? hid)
+                 :on-activate (fn [] (screport/sort-rows! report-instance column))}
+          label))
+      (text {:width col-width :bold true :color :bright-cyan} label))))
+
 (defn render-table-row
   "Renders one report row as a focusable hbox of column cells. Activating the row (Enter/Space) opens
    its edit form — a `ro/form-links` entry on ANY column — or, failing that, runs the report's first
@@ -114,9 +138,7 @@
       (render-page-nav report-instance)
       (line {})
       (hbox {:height 1}
-        (mapv (fn [c] (text {:width col-width :bold true :color :bright-cyan}
-                        (column-label report-instance c)))
-          columns))
+        (mapv (fn [c] (render-column-header report-instance c)) columns))
       (line {})
       ;; The rows scroll inside a viewport that hogs the leftover height (`:grow 1`). Arrowing
       ;; through the focusable rows autoscrolls it (viewport-follows-focus); PageUp/PageDown page it.

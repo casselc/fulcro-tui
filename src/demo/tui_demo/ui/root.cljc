@@ -20,6 +20,25 @@
 
 (def ui-routes (comp/factory Routes))
 
+(def ^:private nav-targets
+  "Top-nav report targets, as `[registry-key label shortcut]`. Registry keywords (not class refs)
+   keep `root` free of require cycles with the report namespaces."
+  [[:tui-demo.ui.invoice-report/InvoiceReport "Invoices" [:alt "1"]]
+   [:tui-demo.ui.account-forms/AccountList    "Accounts" [:alt "2"]]
+   [:tui-demo.ui.item-forms/InventoryReport   "Inventory" [:alt "3"]]])
+
+(defn- nav-bar
+  "A row of buttons that route between the demo's top-level reports."
+  [this]
+  (e/hbox {:height 1}
+    (mapv (fn [[target label shortcut]]
+            (let [bid (keyword "nav" (name target))]
+              (e/button {:id bid :color :bright-blue :highlight (e/focused? bid)
+                         :shortcut shortcut
+                         :on-activate (fn [] (scr/route-to! this target {}))}
+                (str " " label " "))))
+      nav-targets)))
+
 (defsc Root [this {:ui/keys [routes]}]
   {:query         [{:ui/routes (comp/get-query Routes)}
                    [::sc/session-id '_]]
@@ -34,6 +53,8 @@
         (if enhanced?
           "shortcuts: ON (enhanced keyboard) — Alt-s/u/c, Alt-p/n, Alt-c, Alt-j/k"
           "shortcuts: OFF — terminal lacks the enhanced (Kitty/CSI-u) keyboard protocol"))
+      (e/line {})
+      (nav-bar this)
       (e/line {})
       (if (seq (scf/current-configuration this scr/session-id))
         (ui-routes routes)
