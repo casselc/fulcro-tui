@@ -27,11 +27,14 @@
     (hbox {:height 1}
       (when-not read-only?
         (button {:id :form/save :color :green :highlight (e/focused? :form/save)
+                 :shortcut [:alt "s"]
                  :on-activate (fn [] (scform/save! env))} " Save "))
       (when-not read-only?
         (button {:id :form/undo :highlight (e/focused? :form/undo)
+                 :shortcut [:alt "u"]
                  :on-activate (fn [] (scform/undo-all! env))} " Undo "))
       (button {:id :form/cancel :highlight (e/focused? :form/cancel)
+               :shortcut [:alt "c"]
                :on-activate (fn [] (scform/cancel! env))} " Cancel "))))
 
 (defn- subform-block
@@ -44,8 +47,8 @@
         can-add?    (?! (fo/can-add? subform-opts) form-instance ref-key)
         can-delete? (fo/can-delete? subform-opts)
         add-id      (keyword "add" (str (namespace ref-key) "_" (name ref-key)))
-        ;; The items live in their OWN container (id `items-id`) that EXCLUDES the trailing "+ Add"
-        ;; button, so `engine/focus-last-in!` lands on the newly-added item rather than on Add.
+        ;; The items live in their own container (id `items-id`) that hosts the group-nav `:on-key`
+        ;; (Alt-j/Alt-k) and excludes the trailing "+ Add" button.
         items-id    (keyword "items" (str (namespace ref-key) "_" (name ref-key)))
         computed    {:com.fulcrologic.rad.form/master-form     master-form
                      :com.fulcrologic.rad.form/parent          form-instance
@@ -77,12 +80,7 @@
                   data))
               (when can-add?
                 (button {:id add-id :color :green :highlight (e/focused? add-id)
-                         :on-activate (fn []
-                                        (scform/add-child! form-instance ref-key Sub)
-                                        ;; Move focus to the just-appended item (its last field).
-                                        (let [app  (comp/any->app form-instance)
-                                              tree (engine/current-node-tree app)]
-                                          (engine/focus-last-in! app tree items-id)))}
+                         :on-activate (fn [] (scform/add-child! form-instance ref-key Sub))}
                   " + Add "))))
           ((comp/computed-factory Sub) data computed))))))
 

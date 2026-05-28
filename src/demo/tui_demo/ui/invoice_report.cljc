@@ -21,10 +21,11 @@
    ro/row-actions         [{:label  "Edit"
                             :action (fn [report-instance {:invoice/keys [id]}]
                                       (form/edit! report-instance InvoiceForm id))}]
-   ro/controls            {::new {:type   :button
-                                  :local? true
-                                  :label  "New Invoice"
-                                  :action (fn [report-instance] (form/create! report-instance InvoiceForm))}}
+   ro/controls            {::new {:type     :button
+                                  :local?   true
+                                  :label    "New Invoice"
+                                  :shortcut [:alt "c"]
+                                  :action   (fn [report-instance] (form/create! report-instance InvoiceForm))}}
    ro/control-layout      {:action-buttons [::new]}
    ro/paginate?           true
    ro/page-size           40

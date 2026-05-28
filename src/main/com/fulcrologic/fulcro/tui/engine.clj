@@ -1469,7 +1469,13 @@ raw state-map."
   "Returns true if `node` can receive focus. A node is focusable when it has an
 `:id` attribute AND either: its attrs set `:focusable? true`, its tag is `:input`
 or `:button`, or it carries any of the focus-relevant handler attributes
-(`:on-key`, `:on-activate`, `:on-change`, `:on-focus`, `:on-lost-focus`)."
+(`:on-activate`, `:on-change`, `:on-focus`, `:on-lost-focus`).
+
+`:on-key` is deliberately NOT a focus trigger: an `:on-key` handler receives keys by
+bubbling from the focused descendant up through its ancestors (see `route-key`), so a
+container that only routes keys is a passive key-router, not a focus stop. Making such a
+container focusable would put a useless Tab stop on its (non-interactive) corner. A node that
+genuinely needs to be focused for its own key handling must opt in with `:focusable? true`."
   [node]
   [any? => boolean?]
   (boolean
@@ -1478,7 +1484,7 @@ or `:button`, or it carries any of the focus-relevant handler attributes
       (let [{::keys [tag attrs]} node]
         (or (:focusable? attrs)
           (#{:input :button} tag)
-          (some attrs [:on-key :on-activate :on-change :on-focus :on-lost-focus]))))))
+          (some attrs [:on-activate :on-change :on-focus :on-lost-focus]))))))
 
 (>defn focusables
   "Returns an ordered vector of focusable descriptors for every focusable node in
@@ -2279,9 +2285,13 @@ terminal size and is handled by a later task."
            (apply-focus-change! app node-tree old-id new-id))
 
          :else
-         (let []
+         (let [;; Alt/Ctrl-modified chords are never plain text, so a focused input must NOT
+               ;; consume them; they fall through to `route-key` so an ancestor `:on-key` (e.g. a
+               ;; subform's item-to-item navigation) or the global keymap can handle them even while
+               ;; a field is being edited. Shift alone is ordinary uppercase typing and is captured.
+               modified? (or (:ctrl? key-event) (:alt? key-event))]
            (cond
-             (and focused-node (= :input (::tag focused-node)))
+             (and focused-node (= :input (::tag focused-node)) (not modified?))
              (handle-input-key! app focused-node key-event)
 
              ;; Enter or Space on a focusable that has an :on-activate handler activates it.

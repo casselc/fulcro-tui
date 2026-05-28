@@ -471,7 +471,7 @@
     "yields the reset sequence for an empty codes vector"
     (engine/sgr-string []) => "[0m"))
 
-(specification {:covers {`engine/render-buffer "e06fec,93fec6"
+(specification {:covers {`engine/render-buffer "e06fec,fce04b"
                          `engine/paint         "643160,702f9c"}} "render-buffer / paint"
   (component "stacked leaves"
     (let [tree (engine/place (elements/vbox {}
@@ -1026,7 +1026,7 @@
       "clamps a negative caret to the start before inserting"
       (engine/apply-edit "ab" -5 {:key "X" :char "X"}) => {:value "Xab" :caret 1})))
 
-(specification {:covers {`engine/focusable-node? "578cb2,805ed0"}} "focusable-node?"
+(specification {:covers {`engine/focusable-node? "4ef53d,805ed0"}} "focusable-node?"
   (assertions
     "is true for an :input with an :id"
     (engine/focusable-node? (elements/input {:id "i" :value ""})) => true
@@ -1034,8 +1034,10 @@
     (engine/focusable-node? (elements/button {:id "b"} "B")) => true
     "is true for a node explicitly marked :focusable? with an :id"
     (engine/focusable-node? (elements/text {:id "t" :focusable? true} "T")) => true
-    "is true for a node carrying an :on-key handler with an :id"
-    (engine/focusable-node? (elements/box {:id "k" :on-key (fn [_] nil)})) => true
+    "is FALSE for a node whose only handler is :on-key (a passive key-router, not a focus stop)"
+    (engine/focusable-node? (elements/box {:id "k" :on-key (fn [_] nil)})) => false
+    "is true for an :on-key node that also opts into :focusable?"
+    (engine/focusable-node? (elements/box {:id "k" :focusable? true :on-key (fn [_] nil)})) => true
     "is false for a focusable-eligible node lacking an :id"
     (engine/focusable-node? (elements/button {} "B")) => false
     "is false for a plain text node"
@@ -1043,8 +1045,8 @@
     "is false for a non-node value"
     (engine/focusable-node? "not-a-node") => false))
 
-(specification {:covers {`engine/focusables  "87a81b,f5fa35"
-                         `engine/focus-order "ce7895,e77204"
+(specification {:covers {`engine/focusables  "87a81b,bae7c4"
+                         `engine/focus-order "ce7895,9b142b"
                          `engine/next-focus  "59e3a5,dbaa57"
                          `engine/prev-focus  "b15d77,dbaa57"}} "focus ring"
   (let [tree (elements/vbox {:id "root"}
@@ -1287,12 +1289,21 @@
 
 ;; A root modelling a to-many subform: an items list (its own container, excluding the trailing
 ;; Add button) holding two item subforms each tagged with the same :focus-group, plus Add and Save.
-(comp/defsc FocusGroupRoot [_this _props]
+;; The items container carries the Alt-j/Alt-k group-nav `:on-key` exactly as the demo wires it — a
+;; passive key-router (it is NOT focusable; keys reach it by bubbling from the focused field).
+(defn- fg-group-nav [app ev]
+  (let [tree (engine/current-node-tree app)]
+    (case (engine/key-chord ev)
+      [:alt "j"] (do (engine/focus-next-in-group! app tree :line-items) :handled)
+      [:alt "k"] (do (engine/focus-prev-in-group! app tree :line-items) :handled)
+      nil)))
+
+(comp/defsc FocusGroupRoot [this _props]
   {:query         [:fg/x]
    :ident         (fn [] [:component/id ::fg])
    :initial-state {:fg/x 1}}
   (elements/vbox {:id "root"}
-    (elements/vbox {:id "items"}
+    (elements/vbox {:id "items" :on-key (fn [ev] (fg-group-nav (comp/any->app this) ev))}
       (elements/vbox {:id "item-list"}
         (elements/vbox {:id "item-1" :focus-group :line-items}
           (elements/input {:id "i1a" :value ""})
@@ -1312,14 +1323,14 @@
     (rapp/initialize-state! app FocusGroupRoot)
     app))
 
-(specification {:covers {`engine/last-focusable-in     "9fce33,aac4be"
-                         `engine/first-focusable-in    "b37192,cbaf93"
+(specification {:covers {`engine/last-focusable-in     "9fce33,c97494"
+                         `engine/first-focusable-in    "b37192,ab4949"
                          `engine/focus-in!             "050509,272001"
-                         `engine/focus-first-in!       "f6c47f,d641d8"
-                         `engine/focus-last-in!        "b3c124,0fe225"
-                         `engine/focus-next-in-group!  "0c9bca,c9db9a"
-                         `engine/focus-prev-in-group!  "2b4b4d,c9db9a"
-                         `engine/focus-group-step!     "fec179,ff2404"}} "programmatic focus helpers"
+                         `engine/focus-first-in!       "f6c47f,9768bf"
+                         `engine/focus-last-in!        "b3c124,65863a"
+                         `engine/focus-next-in-group!  "0c9bca,d1a9fb"
+                         `engine/focus-prev-in-group!  "2b4b4d,d1a9fb"
+                         `engine/focus-group-step!     "fec179,ec5aa6"}} "programmatic focus helpers"
   (component "last/first-focusable-in scope to a container's subtree"
     (let [app  (build-focus-group-app)
           tree (engine/current-node-tree app)]
@@ -1360,7 +1371,22 @@
       (engine/focus! app "save")                            ; not inside any group member
       (assertions
         "next-in-group lands on the first member's first field"
-        (do (engine/focus-next-in-group! app tree :line-items) (engine/current-focus app)) => "i1a"))))
+        (do (engine/focus-next-in-group! app tree :line-items) (engine/current-focus app)) => "i1a")))
+
+  (component "an Alt chord bubbles past the focused INPUT to an ancestor's :on-key (group nav)"
+    ;; Regression: process-key! must NOT let a focused input swallow Alt/Ctrl chords; they fall
+    ;; through to route-key so the items container's group-nav :on-key fires (Alt-j/Alt-k).
+    (let [app (build-focus-group-app)]
+      (engine/focus! app "i1a")                             ; an inner field of item-1 is being edited
+      (assertions
+        "Alt-j (while the input is focused) jumps to the next group member's first field"
+        (do (engine/process-key! app (alt-key "j")) (engine/current-focus app)) => "i2a"
+        "Alt-k jumps back to the previous member"
+        (do (engine/process-key! app (alt-key "k")) (engine/current-focus app)) => "i1a"
+        "a plain letter is still typed into the focused input (not treated as navigation)"
+        (do (engine/focus! app "i1a")
+            (engine/process-key! app {:key "x" :char "x"})
+            (engine/current-focus app)) => "i1a"))))
 
 (specification {:covers {`engine/current-focus "8b7584"
                          `engine/focus!        "efb19d,dc1929"}} "current-focus / focus!"
@@ -1374,7 +1400,7 @@
       "current-focus also reads from a bare state-map"
       (engine/current-focus {::engine/focus "name"}) => "name")))
 
-(specification {:covers {`engine/process-key! "8d7c68,19b0cb"}} "process-key!"
+(specification {:covers {`engine/process-key! "842938,8e3bf6"}} "process-key!"
   (component "Enter or Space activates a focused button"
     (let [app (build-driver-app)
           sa  (:com.fulcrologic.fulcro.application/state-atom app)]

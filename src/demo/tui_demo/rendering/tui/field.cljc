@@ -156,16 +156,18 @@
    The action is called arity-tolerantly: RAD control actions are usually `(fn [this] …)` (1-arg), but
    some take `[this control-key]`, so we adapt rather than always passing 2 args."
   [{:keys [instance control-key control]}]
-  (let [{:keys [label action disabled? visible?]} control
+  (let [{:keys [label action disabled? visible? shortcut]} control
         label    (?! label instance)
-        visible? (or (nil? visible?) (?! visible? instance))]
+        visible? (or (nil? visible?) (?! visible? instance))
+        ctl-id   (keyword "control" (name control-key))]
     (when visible?
-      (button {:id          (keyword "control" (name control-key))
-               :color       :green
-               :bold        true
-               :highlight   (e/focused? (keyword "control" (name control-key)))
-               :on-activate (fn [] (when (and action (not (?! disabled? instance)))
-                                     ((lambda/->arity-tolerant action) instance control-key)))}
+      (button (cond-> {:id          ctl-id
+                       :color       :green
+                       :bold        true
+                       :highlight   (e/focused? ctl-id)
+                       :on-activate (fn [] (when (and action (not (?! disabled? instance)))
+                                             ((lambda/->arity-tolerant action) instance control-key)))}
+                shortcut (assoc :shortcut shortcut))
         (str " " (or label (name control-key)) " ")))))
 
 (defn render-string-control

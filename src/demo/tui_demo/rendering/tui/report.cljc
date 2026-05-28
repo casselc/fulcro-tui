@@ -83,18 +83,19 @@
       (when (> pages 1)
         (let [first? (<= page 1)
               last?  (>= page pages)
-              nav    (fn [id label disabled? activate]
-                       (button {:id          id
-                                :color       (if disabled? :bright-black :cyan)
-                                :highlight   (and (not disabled?) (e/focused? id))
-                                :on-activate (fn [] (when-not disabled? (activate)))}
+              nav    (fn [id shortcut label disabled? activate]
+                       (button (cond-> {:id          id
+                                        :color       (if disabled? :bright-black :cyan)
+                                        :highlight   (and (not disabled?) (e/focused? id))
+                                        :on-activate (fn [] (when-not disabled? (activate)))}
+                                 (not disabled?) (assoc :shortcut shortcut))
                          label))]
           (hbox {:height 1}
-            (nav :report/prev-page " ◀ Prev " first?
+            (nav :report/prev-page [:alt "p"] " ◀ Prev " first?
               (fn [] (screport/prior-page! report-instance)))
             (text {:width 14 :bold true :color :bright-cyan}
               (str "  Page " page " / " pages "  "))
-            (nav :report/next-page " Next ▶ " last?
+            (nav :report/next-page [:alt "n"] " Next ▶ " last?
               (fn [] (screport/next-page! report-instance)))))))))
 
 (defn render-table-report-layout

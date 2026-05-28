@@ -6,6 +6,7 @@
     [com.fulcrologic.fulcro.components :as comp :refer [defsc]]
     [com.fulcrologic.fulcro.tui.application :as tui-app]
     [com.fulcrologic.fulcro.tui.elements :as e]
+    [com.fulcrologic.fulcro.tui.engine :as engine]
     [com.fulcrologic.statecharts :as-alias sc]
     [com.fulcrologic.statecharts.integration.fulcro :as scf]
     [com.fulcrologic.statecharts.integration.fulcro.routing :as scr]))
@@ -23,9 +24,16 @@
   {:query         [{:ui/routes (comp/get-query Routes)}
                    [::sc/session-id '_]]
    :initial-state {:ui/routes {}}}
-  (let [err (some-> comp/*app* tui-app/last-error)]
+  (let [err       (some-> comp/*app* tui-app/last-error)
+        enhanced? engine/*enhanced-keys?*]
     (e/vbox {:padding 1 :border? true :color :cyan}
       (e/text {:bold true} "Fulcro RAD + Statecharts — Terminal Demo  (Ctrl-Q quit · Ctrl-L redraw)")
+      ;; Shortcut layer status: Alt-* control shortcuts and mnemonic underlines only work when the
+      ;; terminal negotiated the enhanced (Kitty/CSI-u) keyboard protocol at startup.
+      (e/text {:color (if enhanced? :green :bright-red)}
+        (if enhanced?
+          "shortcuts: ON (enhanced keyboard) — Alt-s/u/c, Alt-p/n, Alt-c, Alt-j/k"
+          "shortcuts: OFF — terminal lacks the enhanced (Kitty/CSI-u) keyboard protocol"))
       (e/line {})
       (if (seq (scf/current-configuration this scr/session-id))
         (ui-routes routes)

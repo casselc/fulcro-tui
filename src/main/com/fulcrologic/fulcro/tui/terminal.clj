@@ -258,35 +258,98 @@ both are incremented."
       (let [[ev _] (decode-key [c])]
         ev))))
 
+(defn- kbd-debug!
+  "Appends a one-line diagnostic `msg` to the keyboard-negotiation debug log, but only when the
+   `fulcro.tui.kbd-debug` system property (or `FULCRO_TUI_KBD_DEBUG` env var) is set. The log path is
+   that value when it looks like a path, else `/tmp/fulcro-tui-kbd.log`. Startup-only, so it is cheap
+   and never runs in the hot path; a write failure is swallowed."
+  [msg]
+  (when-let [flag (or (System/getProperty "fulcro.tui.kbd-debug")
+                    (System/getenv "FULCRO_TUI_KBD_DEBUG"))]
+    (try
+      (let [path (if (re-find #"[/.]" (str flag)) (str flag) "/tmp/fulcro-tui-kbd.log")]
+        (spit path (str msg \newline) :append true))
+      (catch Throwable _ nil))))
+
+(defn- read-csi-u-reply
+  "Reads a CSI-u-style reply from `r` after the query was written: blocks up to `first-timeout` ms for
+   the first byte, then accumulates following bytes (each within `tail-timeout` ms) until the `u`
+   terminator (117), EOF, or a timeout. Returns the reply as a vector of ints (empty if nothing
+   arrived). Consumes only the reply so it never leaks into the input loop."
+  [^NonBlockingReader r first-timeout tail-timeout]
+  (let [first-c (.read r (long first-timeout))]
+    (if (or (= first-c NonBlockingReader/READ_EXPIRED) (= first-c NonBlockingReader/EOF))
+      []
+      (loop [acc (transient [(int first-c)])]
+        (let [n (.read r (long tail-timeout))]
+          (cond
+            (= (int n) 117)                                 ; 'u' terminates the reply
+            (persistent! (conj! acc 117))
+            (or (= n NonBlockingReader/READ_EXPIRED) (= n NonBlockingReader/EOF))
+            (persistent! acc)
+            :else
+            (recur (conj! acc (int n)))))))))
+
+(defn- enhanced-keys-override
+  "Returns `:force`, `:off`, or nil from the `fulcro.tui.enhanced-keys` system property (or
+   `FULCRO_TUI_ENHANCED_KEYS` env var). `force`/`on`/`true`/`1` ⇒ `:force` (skip auto-detection and
+   enable the protocol — for terminal stacks that carry CSI-u but do NOT answer the query, e.g. tmux
+   with `extended-keys on`). `off`/`false`/`0` ⇒ `:off` (force-disable). Anything else ⇒ nil (probe)."
+  []
+  (when-let [v (some-> (or (System/getProperty "fulcro.tui.enhanced-keys")
+                         (System/getenv "FULCRO_TUI_ENHANCED_KEYS"))
+                 str
+                 (.trim)
+                 (.toLowerCase))]
+    (cond
+      (#{"force" "on" "true" "1" "yes"} v) :force
+      (#{"off" "false" "0" "no"} v)        :off
+      :else                                nil)))
+
 (defn- negotiate-enhanced-keys!
   "Probes for the Kitty/fixterms enhanced keyboard protocol on the JLine `term` (already in raw mode)
-   and enables it when present. Writes the query, then reads any reply within a short timeout: a
-   conforming terminal answers with `ESC [ ? <flags> u`, while others stay silent (read times out).
-   On a positive reply, pushes the enable flags and returns true; otherwise returns false. The reply
-   bytes are consumed here so they never leak into the input loop."
+   and enables it when present. Writes the query, then reads any reply: a conforming terminal answers
+   with `ESC [ ? <flags> u`, while others stay silent (read times out). On a positive reply, pushes
+   the enable flags and returns true; otherwise returns false. The reply bytes are consumed here so
+   they never leak into the input loop.
+
+   The `fulcro.tui.enhanced-keys` system property / `FULCRO_TUI_ENHANCED_KEYS` env var overrides the
+   probe: `force` enables the protocol without querying (push the flags and trust it — needed under
+   tmux/screen, which carry CSI-u once configured but swallow the query); `off` force-disables it.
+
+   Set the `fulcro.tui.kbd-debug` system property (or `FULCRO_TUI_KBD_DEBUG` env var) to log the raw
+   query/reply bytes to a file (see `kbd-debug!`) when diagnosing terminals that report OFF."
   [^org.jline.terminal.Terminal term]
   (try
-    (let [w (.writer term)
-          r ^NonBlockingReader (.reader term)]
-      (.write w ^String ansi-kitty-query)
-      (.flush w)
-      (let [first-c (.read r 80)]                          ; wait up to 80ms for the start of a reply
-        (if (or (= first-c NonBlockingReader/READ_EXPIRED) (= first-c NonBlockingReader/EOF))
-          false
-          (let [reply (loop [acc (transient [(int first-c)])]
-                        (let [n (.read r 20)]
-                          (if (or (= n NonBlockingReader/READ_EXPIRED)
-                                (= n NonBlockingReader/EOF)
-                                (= (int n) 117))           ; 'u' terminates the reply
-                            (persistent! (cond-> acc (and (int? n) (= (int n) 117)) (conj! 117)))
-                            (recur (conj! acc (int n))))))
-                ok?   (and (= (take 3 reply) [27 91 63])   ; ESC [ ?
+    (let [override (enhanced-keys-override)
+          w        (.writer term)
+          r        ^NonBlockingReader (.reader term)]
+      (case override
+        :off (do (kbd-debug! "[fulcro-tui kbd] override=off → disabled") false)
+        :force (do
+                 (.write w ^String ansi-kitty-enable)
+                 (.flush w)
+                 (kbd-debug! "[fulcro-tui kbd] override=force → flags pushed, enabled (no probe)")
+                 true)
+        (do
+          (.write w ^String ansi-kitty-query)
+          (.flush w)
+          ;; 250ms first-byte window (generous for slow/remote terminals; startup-only so latency is
+          ;; irrelevant), then 30ms between the few reply bytes.
+          (let [reply (read-csi-u-reply r 250 30)
+                ok?   (and (= (take 3 reply) [27 91 63])    ; ESC [ ?
                         (= (peek reply) 117))]
+            (kbd-debug! (str "[fulcro-tui kbd] query=" (mapv int ansi-kitty-query)
+                          " reply-bytes=" reply
+                          " reply-str=" (pr-str (apply str (map char reply)))
+                          " enhanced?=" (boolean ok?)))
             (when ok?
               (.write w ^String ansi-kitty-enable)
               (.flush w))
             (boolean ok?)))))
-    (catch Throwable _ false)))
+    (catch Throwable t
+      (kbd-debug! (str "[fulcro-tui kbd] negotiation threw: " (ex-message t)))
+      false)))
 
 (deftype JLineTerminal [^org.jline.terminal.Terminal term resize-handler closed? enhanced?]
   Terminal
@@ -349,6 +412,43 @@ both are incremented."
   []
   (let [term (.. (TerminalBuilder/builder) (system true) (build))]
     (->JLineTerminal term (atom nil) (atom false) (atom false))))
+
+(defn probe-enhanced-keys!
+  "Diagnostic: builds a system JLine terminal, sends the Kitty/CSI-u progressive-enhancement query,
+   reads whatever the terminal replies (no alt-screen, no shortcut handling), restores the terminal,
+   and PRINTS the raw reply bytes and the OK/not-OK verdict to stdout. Run this directly in the
+   terminal you want to test (e.g. `clojure -e \"((requiring-resolve 'com.fulcrologic.fulcro.tui.terminal/probe-enhanced-keys!))\"`).
+   A conforming terminal replies `ESC [ ? <flags> u` (bytes start `27 91 63`, end `117`)."
+  []
+  (let [term (.. (TerminalBuilder/builder) (system true) (build))]
+    (try
+      (.enterRawMode term)
+      (let [w (.writer term)
+            r ^NonBlockingReader (.reader term)]
+        (.write w ^String ansi-kitty-query)
+        (.flush w)
+        (let [reply (read-csi-u-reply r 500 40)
+              ok?   (and (= (take 3 reply) [27 91 63]) (= (peek reply) 117))]
+          (.close term)
+          (println)
+          (println "=== fulcro-tui enhanced-keyboard probe ===")
+          (println "TERM         =" (System/getenv "TERM"))
+          (println "TERM_PROGRAM =" (System/getenv "TERM_PROGRAM"))
+          (println "query bytes  =" (mapv int ansi-kitty-query) " (ESC [ ? u)")
+          (println "reply bytes  =" reply)
+          (println "reply string =" (pr-str (apply str (map char reply))))
+          (println "enhanced?    =" ok?)
+          (when-not ok?
+            (println)
+            (if (empty? reply)
+              (println "No reply: this terminal did not answer the query — the Kitty keyboard protocol")
+              (println "Unexpected reply shape — the terminal answered but not with ESC [ ? <flags> u."))
+            (println "is either unsupported or disabled. Shortcuts/mnemonics stay OFF here."))
+          ok?))
+      (catch Throwable t
+        (try (.close term) (catch Throwable _ nil))
+        (println "probe threw:" (ex-message t))
+        false))))
 
 ;; =============================================================================
 ;; Fake terminal (string-terminal)
