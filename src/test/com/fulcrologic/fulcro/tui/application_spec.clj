@@ -83,8 +83,8 @@
 
 ;; ---------------------------------------------------------------------------
 
-(specification {:covers {`app/application      "0c544b,1e6acb"
-                         `app/attach!          "d47881,9cc90f"
+(specification {:covers {`app/application      "bc5160,102e48"
+                         `app/attach!          "d47881,1a65e4"
                          `app/render!          "b81026,7839ca"
                          `app/screen-of        "0ca459,662c58"
                          `app/screen-styled-of "3815eb,5083b1"
@@ -326,9 +326,9 @@
         "scrolling back up reveals the first wrapped row again"
         (first (app/screen-of app)) => "the quick   "))))
 
-(specification {:covers {`app/mount!        "9db704,3e8130"
-                         `app/run-blocking! "ecfe25,ccf6a6"
-                         `app/quit!         "aa6cd2,a354d9"}} "mount! / run! — input loop"
+(specification {:covers {`app/mount!        "b62698,77359a"
+                         `app/run-blocking! "ecfe25,39daeb"
+                         `app/quit!         "336706,a354d9"}} "mount! / run! — input loop"
   (component "run! with a finite key script processes the keys and ends, leaving the terminal"
     (let [app (new-app)
           t   (term/string-terminal {:rows 10 :cols 30
@@ -371,6 +371,28 @@
         (:left? @(.-state t)) => true
         "keys after the quit chord were not processed by the focus/input pipeline"
         (:app/a (state app)) => (:app/a (state (new-app)))))))
+
+(specification {:covers {`app/run-render-loop! "971aca,6bb8c0"}}
+  "live render loop — repaints a state change made off the input thread (decoupled rendering)"
+  (let [app    (new-app)
+        ;; No scripted keys: the input loop reads nil and exits immediately, leaving ONLY the
+        ;; dedicated render loop running — exactly the thread we want to prove paints.
+        t      (term/string-terminal {:rows 10 :cols 30})
+        handle (app/mount! app {:terminal t :max-fps 120})]
+    ;; A state change NOT driven by a keystroke (stands in for a statechart/async update). It only
+    ;; flags dirty on THIS thread; the render loop must pick it up and repaint.
+    (comp/transact! app [(set-a {:v "ZZ"})])
+    (let [painted? (loop [n 0]
+                     (cond
+                       ;; screen-of reads the LAST PAINTED buffer (it does not render) — so a match
+                       ;; proves the render loop, not this thread, did the paint.
+                       (str/starts-with? (or (nth (app/screen-of app) 0 nil) "") "ZZ") true
+                       (>= n 200) false
+                       :else (do (Thread/sleep 10) (recur (inc n)))))]
+      (app/quit! handle)
+      (assertions
+        "the dedicated render loop repaints an off-input-thread state change without an explicit render!"
+        painted? => true))))
 
 ;; ---------------------------------------------------------------------------
 ;; Overlay / picker: a root with a launch button and a state-gated picker.
@@ -491,7 +513,7 @@
 ;; Entrypoint niceties: start!, app-level global-keymap, lifecycle (C1/C2).
 ;; ---------------------------------------------------------------------------
 
-(specification {:covers {`app/start! "f91686,f52ee8"}} "start! — build + run in one call"
+(specification {:covers {`app/start! "f91686,15ed47"}} "start! — build + run in one call"
   (component "start! builds the app (application) and runs it to completion (run-blocking!)"
     (let [t      (term/string-terminal {:rows 10 :cols 30
                                         :keys [{:key "H" :char "H"}
@@ -571,40 +593,50 @@
         "the loop stopped and left the terminal"
         (:left? @(.-state t)) => true))))
 
-(specification {:covers {`app/request-render! "92aa4b,3b5862"}} "request-render! — throttle + coalescing"
+(def ^:private dirty-key :com.fulcrologic.fulcro.tui.application/dirty?)
+(def ^:private render-loop-key :com.fulcrologic.fulcro.tui.application/render-loop)
+
+(specification {:covers {`app/mark-dirty! "9d0878,089ec1"}} "mark-dirty!"
+  (let [runtime-key :com.fulcrologic.fulcro.application/runtime-atom
+        app         (new-app)
+        dirty       (get @(get app runtime-key) dirty-key)]
+    (assertions
+      "the app is built with a (clear) dirty flag"
+      @dirty => false)
+    (app/mark-dirty! app)
+    (assertions
+      "sets the app's dirty flag so the render loop will repaint"
+      @dirty => true)))
+
+(specification {:covers {`app/request-render! "f8787f,f4b24a"}}
+  "request-render! — synchronous when no render loop, else defers to it"
   (let [runtime-key :com.fulcrologic.fulcro.application/runtime-atom]
-    (component "throttling disabled (default) renders synchronously, one render per request"
-      (let [app    (new-app)
-            t      (term/string-terminal {:rows 10 :cols 30})
-            _      (app/attach! app t)                       ; one initial render
-            calls  (atom 0)]
+    (component "no render loop installed renders synchronously, one render per request"
+      (let [app   (new-app)
+            t     (term/string-terminal {:rows 10 :cols 30})
+            _     (app/attach! app t)                        ; one initial render
+            calls (atom 0)]
         (with-redefs [app/render! (fn [a] (swap! calls inc) a)]
           (dotimes [_ 5] (app/request-render! app)))
         (assertions
-          "every request rendered synchronously (no throttle keys installed)"
+          "every request renders synchronously (no render loop present)"
           @calls => 5)))
 
-    (component "throttling enabled coalesces a burst into fewer renders with a trailing render"
-      (let [app    (new-app)
-            t      (term/string-terminal {:rows 10 :cols 30})
-            _      (app/attach! app t)
-            calls  (atom 0)]
-        ;; Install a live-path throttle directly on the runtime atom (mount! does this from :max-fps).
-        (swap! (get app runtime-key) assoc
-          :com.fulcrologic.fulcro.tui.application/render-throttle-ms 50
-          :com.fulcrologic.fulcro.tui.application/last-render-ns (atom 0)
-          :com.fulcrologic.fulcro.tui.application/render-scheduled? (atom false))
+    (component "a render loop present defers painting to it (flags dirty, never paints on the caller)"
+      (let [app   (new-app)
+            t     (term/string-terminal {:rows 10 :cols 30})
+            _     (app/attach! app t)
+            dirty (get @(get app runtime-key) dirty-key)
+            ;; A stand-in render-loop thread: request-render! only checks that a loop is present (via
+            ;; its :thread) to decide it must route to mark-dirty! rather than paint on the caller.
+            th    (Thread. ^Runnable (fn []))
+            calls (atom 0)]
+        (swap! (get app runtime-key) assoc render-loop-key {:thread th :running? (atom true)})
+        (reset! dirty false)
         (with-redefs [app/render! (fn [a] (swap! calls inc) a)]
-          ;; last-render-ns starts at 0 so the FIRST request renders immediately (leading edge),
-          ;; the rest fall inside the window and coalesce into ONE scheduled trailing render.
-          (dotimes [_ 20] (app/request-render! app))
-          (let [during @calls]
-            ;; let the trailing daemon fire (window is 50ms; sleep well past it)
-            (Thread/sleep 120)
-            (assertions
-              "a burst of 20 produced far fewer than 20 renders (leading edge only, mid-burst)"
-              (< during 20) => true
-              "the leading edge rendered at least once immediately"
-              (pos? during) => true
-              "exactly one extra trailing render fired after the window"
-              (- @calls during) => 1)))))))
+          (app/request-render! app))
+        (assertions
+          "does NOT render on the calling thread"
+          @calls => 0
+          "flags the app dirty so the render loop repaints"
+          @dirty => true)))))

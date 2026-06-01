@@ -46,8 +46,8 @@
 (>def ::handle map?)
 (>def ::global-keymap (? map?))
 (>def ::render-throttle-ms int?)
-(>def ::last-render-ns (? any?))                            ; atom holding the last render time in ns
-(>def ::render-scheduled? (? any?))                         ; atom<boolean> guarding a single trailing render
+(>def ::dirty? (? any?))                                    ; atom<boolean>: a repaint is pending (see `mark-dirty!`)
+(>def ::render-loop (? any?))                               ; the render-driver handle {:thread :running?} (live path)
 (>def ::min-size (s/keys :req-un [::min-width ::min-height]))
 (>def ::min-width int?)
 (>def ::min-height int?)
@@ -69,6 +69,17 @@
   [app]
   [any? => (? any?)]
   (::terminal (runtime app)))
+
+(>defn mark-dirty!
+  "Flags `app` as needing a repaint. This is the ONLY thing a state change does about rendering — the
+   actual paint happens on the render loop (live runs) or on an explicit `render!`/`step!` (the
+   deterministic/test path). It is cheap (a single atom write) and runs on whatever thread mutated state
+   (e.g. the statechart event loop), so no painting — and no terminal lock — is ever taken on a
+   state-mutation thread. Returns `app`."
+  [app]
+  [any? => any?]
+  (when-let [d (::dirty? (runtime app))] (reset! d true))
+  app)
 
 ;; ============================================================================
 ;; Render (the custom optimized paint)
@@ -386,54 +397,53 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
                       app))))))
 
 (>defn request-render!
-  "Requests a repaint of `app`, coalescing bursts into at most one render per throttle window.
+  "Requests a repaint of `app`. When a render loop is running (the live `mount!`/`run-blocking!`/
+   `start!` path) this just flags the app dirty and wakes the loop (`mark-dirty!`), so the paint
+   happens on the dedicated render thread — never on the caller's thread. Otherwise (the deterministic
+   path — `attach!`/`step!`/tests, which have no render loop) it renders SYNCHRONOUSLY, i.e. identical
+   to calling `render!`. Returns `app`.
 
-The throttle interval (ms) is read from the runtime atom (`::render-throttle-ms`, default `0`). When
-the interval is `<= 0` (the default for `attach!`/`step!`/direct `mount!` — i.e. the deterministic
-test path) this renders SYNCHRONOUSLY and is identical to calling `render!`.
-
-When the interval is `> 0` (the live run path: `run-blocking!`/`start!`) it is a leading+trailing
-edge throttle. If at least the interval has elapsed since the last render it renders immediately
-(leading edge) and records the time. Otherwise it schedules ONE daemon thread that sleeps the
-remaining time and then renders the LATEST app state (trailing edge); further requests inside that
-window coalesce into that single scheduled render (it reads current state at paint time, so the
-final state is always painted). The deferred paint is wrapped in try/catch so a render that lands
-after `quit!` closes the terminal cannot crash the daemon. Returns `app`."
+   This is for repaint requests that originate on a SAFE thread (the input loop, a resize signal, an
+   explicit `redraw!`). State-change-driven repaints go through `mark-dirty!` directly (from the
+   `:core-render!` hook) so they never render on the mutating thread even on the test path."
   [app]
   [any? => any?]
-  (let [rt        (runtime app)
-        throttle  (long (or (::render-throttle-ms rt) 0))
-        last-atom (::last-render-ns rt)
-        sched     (::render-scheduled? rt)]
-    (if (or (<= throttle 0) (nil? last-atom) (nil? sched))
-      (render! app)
-      (let [interval-ns (* throttle 1000000)
-            now         (System/nanoTime)
-            last        (long (or @last-atom 0))
-            elapsed     (- now last)]
-        (if (>= elapsed interval-ns)
+  (if (some-> (runtime app) ::render-loop :thread)
+    (mark-dirty! app)
+    (render! app)))
+
+(def ^:private idle-poll-ms
+  "How often the render loop checks the dirty flag while idle (ms). Small enough to be imperceptible as
+   input→paint latency, large enough that an idle session costs ~nothing."
+  8)
+
+(>defn- run-render-loop!
+  "The live render driver: the SOLE thread that paints automatically. It polls the `::dirty?` flag and,
+   whenever it is set, clears it and renders the LATEST state once — then, if a positive frame budget
+   (`::render-throttle-ms`) is set, sleeps that budget to cap the frame rate (coalescing a burst of
+   changes into one trailing repaint). While idle it sleeps `idle-poll-ms`.
+
+   Clearing the flag BEFORE rendering is deliberate: any state change that lands DURING a paint
+   re-sets the flag and is therefore shown by the next iteration, so the latest state is always
+   eventually painted (intermediate frames may be coalesced away, which is desired). This decouples
+   painting from state mutation — no transaction or statechart-event thread ever paints. Tolerates
+   per-frame render errors (`record-error!`) so a bad frame cannot kill the loop. Exits when `running?`
+   goes false (within `idle-poll-ms`).
+
+   Polling — rather than `LockSupport` park/unpark — is intentional: babashka's SCI cannot resolve
+   `java.util.concurrent.locks.LockSupport`, and the engine must load and run under babashka."
+  [app running? throttle-ms]
+  [any? any? int? => any?]
+  (let [dirty (::dirty? (runtime app))]
+    (loop []
+      (when @running?
+        (if (and dirty @dirty)
           (do
-            (reset! last-atom now)
-            (render! app))
-          (when (compare-and-set! sched false true)
-            (let [remaining-ms (max 1 (quot (- interval-ns elapsed) 1000000))
-                  runnable     (fn deferred-render []
-                                 (try
-                                   (Thread/sleep (long remaining-ms))
-                                   (reset! last-atom (System/nanoTime))
-                                   (reset! sched false)
-                                   ;; Late paint guard: after quit! the loop's `:running?` is false
-                                   ;; and the terminal is closed. Skip if shutting down, and wrap the
-                                   ;; render so a stale frame can never crash the daemon nor surface.
-                                   (let [running? (some-> (runtime app) ::handle :running? deref)]
-                                     (when (not (false? running?))
-                                       (try (render! app) (catch Throwable t (record-error! app t)))))
-                                   (catch Throwable t
-                                     (reset! sched false)
-                                     (record-error! app t))))
-                  t            (Thread. ^Runnable runnable "fulcro-tui-render")]
-              (.setDaemon t true)
-              (.start t))))))
+            (reset! dirty false)
+            (try (render! app) (catch Throwable t (record-error! app t)))
+            (when (pos? throttle-ms) (Thread/sleep (long throttle-ms))))
+          (Thread/sleep (long idle-poll-ms)))
+        (recur)))
     app))
 
 (>defn redraw!
@@ -579,13 +589,19 @@ terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
          throttle-ms   (if (and max-fps (pos? (long max-fps))) (quot 1000 (long max-fps)) 0)
          running?      (atom true)
          error         (atom nil)]
-     ;; Install throttle bookkeeping BEFORE attach! so the initial paint + resize handler see it.
-     ;; With throttle-ms 0 (no :max-fps) request-render! is synchronous == today.
-     (swap! (runtime-atom-key app) assoc
-       ::render-throttle-ms throttle-ms
-       ::last-render-ns (atom 0)
-       ::render-scheduled? (atom false))
+     ;; Record the frame budget, then do the initial (synchronous) paint via attach!. The dedicated
+     ;; render loop is started AFTER attach! so it only services subsequent repaints — and once it is
+     ;; running, `request-render!`/`mark-dirty!` route ALL further paints onto it (never onto the input
+     ;; loop, a transaction, or the statechart event-loop thread).
+     (swap! (runtime-atom-key app) assoc ::render-throttle-ms throttle-ms)
      (attach! app terminal)
+     (let [render-running? (atom true)
+           render-thread   (Thread. ^Runnable (fn [] (try (run-render-loop! app render-running? throttle-ms)
+                                                          (catch Throwable _ nil)))
+                             "fulcro-tui-render")]
+       (.setDaemon render-thread true)
+       (swap! (runtime-atom-key app) assoc ::render-loop {:thread render-thread :running? render-running?})
+       (.start render-thread))
      (let [loop-fn (fn input-loop []
                      (try
                        (loop []
@@ -678,8 +694,13 @@ if a transport does not, the loop ends on the next keypress/EOF instead."
                  (:running? handle-or-app) handle-or-app
                  :else (some-> (:com.fulcrologic.fulcro.application/runtime-atom handle-or-app)
                          deref ::handle))
-        {:keys [^Thread thread running? terminal]} (or handle {:terminal (terminal handle-or-app)})]
+        {:keys [^Thread thread running? terminal]} (or handle {:terminal (terminal handle-or-app)})
+        app    (or (:app handle) handle-or-app)
+        rl     (some-> (runtime app) ::render-loop)]
     (when running? (reset! running? false))
+    ;; Stop the dedicated render loop too, so no frame paints after the terminal is left/closed (it
+    ;; notices the flag within `idle-poll-ms` and exits).
+    (when-let [r (:running? rl)] (reset! r false))
     (when terminal
       ;; C1: drop the resize handler BEFORE closing, so a concurrent SIGWINCH can't paint a
       ;; closed terminal. Then C3: t-leave! closes it, forcing the blocked read to EOF.
@@ -751,14 +772,22 @@ Typically you will use `run-blocking!` to actually run the application."
                 (merge
                   opts
                   (cond-> {:core-render!      (fn [app _opts]
-                                                ;; While the driver is batching a keystroke's
-                                                ;; mutations (`engine/*suppress-render*`), a
-                                                ;; transaction's render is deferred to the single
-                                                ;; post-dispatch render so one key = one frame.
+                                                ;; A state change NEVER paints synchronously — it only
+                                                ;; flags the app dirty (cheap) so the dedicated render
+                                                ;; loop repaints. This decouples the engine internals
+                                                ;; from the UI: a transaction on ANY thread (notably the
+                                                ;; statechart event loop) cannot take the terminal lock
+                                                ;; or run a paint. While the input driver is batching a
+                                                ;; keystroke's mutations (`engine/*suppress-render*`) we
+                                                ;; skip even the flag, because that path renders ONCE
+                                                ;; explicitly after dispatch.
                                                 (when-not engine/*suppress-render*
-                                                  (request-render! app)))
+                                                  (mark-dirty! app)))
                            :optimized-render! (fn [_app _opts] true)
                            :render-root!      (constantly true)}))))]
+    ;; Every app gets a dirty flag so `:core-render!`/`mark-dirty!` work even on the deterministic
+    ;; (no-render-loop) test path (where it is set but nobody auto-paints — tests paint explicitly).
+    (swap! (runtime-atom-key app) assoc ::dirty? (atom false))
     ;; Default-on: initialize from the Root's declared :initial-state unless the caller
     ;; explicitly opts out with `:initial-state false`.
     (when (get opts :initial-state true)

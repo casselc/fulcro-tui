@@ -1,25 +1,22 @@
 ;; ===========================================================================
-;; Babashka target for fulcro-tui.
+;; Babashka target for fulcro-tui (the terminal UI engine).
 ;;
-;; The TUI now loads and runs under babashka. The two historical blockers were
-;; both in Fulcro CORE and are resolved as of the Fulcro build this depends on
-;; (the one that publishes `…algorithms.macro-support`):
+;; The TUI loads and runs under babashka. The historical blockers were in Fulcro CORE and are resolved
+;; as of the Fulcro build this depends on:
 ;;
-;;   1. Fulcro's `Mutation` `deftype` implements `clojure.lang.IFn`, which bb's
-;;      SCI could not construct — `defmutation` now loads and runs.
-;;   2. The transitively-pulled `org.clojure/spec.alpha` and
-;;      `org.clojure/clojurescript` jars no longer shadow bb's built-ins.
+;;   1. Fulcro's `Mutation` `deftype` implements `clojure.lang.IFn`, which bb's SCI could not
+;;      construct — `defmutation` now loads and runs.
+;;   2. The transitively-pulled `org.clojure/spec.alpha` and `org.clojure/clojurescript` jars no longer
+;;      shadow bb's built-ins.
 ;;
 ;; A third, bb-specific blocker lived here in the TUI: JLine's resize signal API
-;; (`Terminal$Signal`/`Terminal$SignalHandler`) uses INNER classes that SCI can
-;; neither resolve nor `reify`. terminal.cljc now routes SIGWINCH through the
-;; top-level `sun.misc.Signal`/`SignalHandler` instead, which works on both the
-;; JVM and bb.
+;; (`Terminal$Signal`/`Terminal$SignalHandler`) uses INNER classes that SCI can neither resolve nor
+;; `reify`. terminal.cljc routes SIGWINCH through the top-level `sun.misc.Signal`/`SignalHandler`
+;; instead, which works on both the JVM and bb.
 ;;
-;; Run the demo in a real terminal with:  bb run tui   (or: bb tui)
+;; Run the example TUI form in a real terminal with:  bb run tui   (or: bb tui)
 ;;
-;; Note: babashka bundles JLine, so there is intentionally no org.jline/jline
-;; dependency here (unlike deps.edn, which needs it on the JVM).
+;; Note: babashka bundles JLine, so there is intentionally no org.jline/jline dependency here.
 ;; ===========================================================================
 {:paths ["src/main" "src/tui-example"]
  :deps  {com.fulcrologic/fulcro {:mvn/version "3.10.0-RC2"}}
@@ -28,47 +25,12 @@
                :task     (tui-example.form/-main)}
 
          ;; ---------------------------------------------------------------------
-         ;; Full-stack RAD + statechart demo SERVER (see src/demo). Datomic Local is JVM-only and
-         ;; will NOT run under babashka, so this task shells out to the JVM Clojure CLI rather than
-         ;; running in-process. Two-terminal demo: `bb server` here, `bb demo` in another terminal.
-         ;; ---------------------------------------------------------------------
-         server {:doc  "Start + seed the JVM demo server on :3001 (shells `clojure -M:demo-server`)."
-                 :task (clojure "-M:demo-server")}
-
-         ;; ---------------------------------------------------------------------
-         ;; Full-stack RAD + statechart demo CLIENT (see src/demo). Talks transit HTTP to the
-         ;; JVM demo server, which you must start first:  bb server   (port 3001).
-         ;; All published mvn versions (each carries the babashka-compat fixes). fulcro comes from
-         ;; the top-level :deps (3.10.0-RC2). clojurescript/spec.alpha are excluded (pure clj/bb
-         ;; client; they clash with SCI); statecharts is excluded from rad-statecharts so the
-         ;; explicit RC18 wins.
-         ;; ---------------------------------------------------------------------
-         demo {:doc         "Run the full-stack RAD/statechart demo client (needs `bb server` on :3001)."
-               :extra-paths ["src/demo"]
-               :extra-deps  {com.fulcrologic/statecharts            {:mvn/version "1.4.0-RC18"}
-                             com.fulcrologic/fulcro-rad             {:mvn/version "1.6.24"}
-                             com.fulcrologic/fulcro-rad-statecharts {:mvn/version "0.1.5"
-                                                                     :exclusions [org.clojure/clojurescript
-                                                                                  org.clojure/spec.alpha
-                                                                                  com.fulcrologic/statecharts]}
-                             org.babashka/http-client               {:mvn/version "0.4.22"}}
-               :requires    ([tui-demo.client.main])
-               :task        (tui-demo.client.main/-main)}
-
-         ;; ---------------------------------------------------------------------
-         ;; Babashka test runner.
-         ;;
-         ;; Runs the project's specs under bb itself, so the bb-target code stays honestly
-         ;; green on bb (not just on the JVM). fulcro-spec >= 3.2.10 loads and runs under bb
-         ;; (earlier versions could not — they required `cljs.test` unconditionally, which SCI
-         ;; rejects; 3.2.10 added `:bb` reader conditionals). The specs run unchanged.
-         ;;
-         ;; `bb-specs` is the set of spec namespaces whose CODE-UNDER-TEST also loads under bb.
-         ;; The whole TUI library is bb-compatible, so this should be every `*-spec` ns; the
-         ;; list is explicit (not glob discovery) so adding a spec that pulls something
+         ;; Babashka test runner. Runs the engine's specs under bb itself, so the bb-target code stays
+         ;; honestly green on bb (not just on the JVM). fulcro-spec >= 3.2.10 loads and runs under bb.
+         ;; The set is explicit (not glob discovery) so adding a spec that pulls something
          ;; bb-incompatible fails loudly here instead of silently skipping.
          ;; ---------------------------------------------------------------------
-         test {:doc         "Run the project specs under babashka (fulcro-spec, same files as the JVM suite)."
+         test {:doc         "Run the engine specs under babashka (fulcro-spec, same files as the JVM suite)."
                :extra-paths ["src/test"]
                :extra-deps  {fulcrologic/fulcro-spec {:mvn/version "3.2.10"
                                                       :exclusions  [com.fulcrologic/fulcro

@@ -1,6 +1,9 @@
 {:paths   ["src/main"]
 
- :deps    {com.fulcrologic/fulcro {:mvn/version "3.10.0-RC1"}
+ ;; The fulcro-tui terminal UI engine (com.fulcrologic.fulcro.tui.*). fulcro 3.10.0-RC2 carries the
+ ;; babashka-compat (SCI) fixes the engine relies on. The RAD rendering plugin that targets this engine
+ ;; lives in its own project, fulcro-rad-tui.
+ :deps    {com.fulcrologic/fulcro {:mvn/version "3.10.0-RC2"}
            org.jline/jline        {:mvn/version "3.27.1"}}
 
  :aliases {:test        {:extra-paths ["src/test"]
@@ -28,70 +31,14 @@
            :tui         {:extra-paths ["src/tui-example"]
                          :main-opts   ["-m" "tui-example.form"]}
 
-           ;; ─── Full-stack RAD/statechart demo (see src/demo) ─────────────────────────
-           ;; All published mvn versions, all carrying the babashka-compat fixes:
-           ;; fulcro 3.10.0-RC2 (the `->arity-tolerant` SCI fix), statecharts 1.4.0-RC18
-           ;; (promise shim + encore→algorithms.core), fulcro-rad 1.6.24 (cljs-analyzer :bb guards),
-           ;; fulcro-rad-statecharts 0.1.5. fulcro-rad-statecharts transitively pins an older
-           ;; statecharts, so we exclude it and declare statecharts explicitly.
-
-           ;; JVM-only server: Datomic Local (in-memory) + Pathom v2 behind a standard Fulcro
-           ;; transit /api. Uses the well-tested datomic-cloud RAD adapter against a :dev-local
-           ;; :mem database (NOT babashka-compatible — Datomic Local is JVM-only; the bb `server`
-           ;; task shells out to `clojure -M:demo-server`). fulcro-rad-datomic transitively pins an
-           ;; older fulcro-rad, so we exclude it and let the explicit 1.6.24 win.
-           :demo-server {:extra-paths ["src/demo"]
-                         :extra-deps  {com.fulcrologic/fulcro-rad-statecharts {:mvn/version "0.1.5"
-                                                                               :exclusions [com.fulcrologic/statecharts]}
-                                       com.fulcrologic/fulcro                 {:mvn/version "3.10.0-RC2"}
-                                       com.fulcrologic/statecharts            {:mvn/version "1.4.0-RC18"}
-                                       com.fulcrologic/fulcro-rad             {:mvn/version "1.6.24"}
-                                       com.fulcrologic/fulcro-rad-datomic     {:mvn/version "1.5.6"
-                                                                               :exclusions [com.fulcrologic/fulcro-rad]}
-                                       com.datomic/local                      {:mvn/version "1.0.291"}
-                                       com.datomic/client-cloud               {:mvn/version "1.0.131"}
-                                       com.wsscode/pathom                     {:mvn/version "2.4.0"}
-                                       http-kit/http-kit                      {:mvn/version "2.8.1"}
-                                       ring/ring-core                         {:mvn/version "1.15.3"}}
-                         :main-opts   ["-m" "tui-demo.server.main"]}
-
-           ;; TUI client (also runnable under babashka via `bb run demo`). NO datascript here.
-           ;; clojurescript / spec.alpha excluded: the client is pure clj/bb, and those jars clash
-           ;; with babashka's SCI internals (same reason the bb test task excludes them).
-           :demo        {:extra-paths ["src/demo"]
-                         :extra-deps  {com.fulcrologic/fulcro-rad-statecharts
-                                       {:mvn/version "0.1.5"
-                                        :exclusions [org.clojure/clojurescript
-                                                     org.clojure/spec.alpha
-                                                     com.fulcrologic/statecharts]}
-                                       com.fulcrologic/statecharts {:mvn/version "1.4.0-RC18"}
-                                       com.fulcrologic/fulcro-rad  {:mvn/version "1.6.24"}
-                                       com.fulcrologic/fulcro      {:mvn/version "3.10.0-RC2"}
-                                       org.babashka/http-client    {:mvn/version "0.4.22"}}
-                         :main-opts   ["-m" "tui-demo.client.main"]}
-
            ;; DEBUG ONLY (JVM, not babashka): turns on the Fulcro Inspect shim via
-           ;; -Dtui.inspect=true. The shim (`com.fulcrologic.fulcro.tui.inspect`) now lives in
-           ;; src/main (always on the classpath, loaded on demand), so this alias only sets the
-           ;; system property, which flips `application`'s `:inspect?` default on. Combine with
-           ;; :tui, e.g. `clojure -M:tui:inspect`. Requires the standalone Fulcro Inspect (Electron)
-           ;; app running on localhost:8237.
+           ;; -Dtui.inspect=true. The shim (`com.fulcrologic.fulcro.tui.inspect`) lives in src/main
+           ;; (loaded on demand), so this alias only sets the system property, which flips
+           ;; `application`'s `:inspect?` default on. Combine with :tui, e.g. `clojure -M:tui:inspect`.
+           ;; Requires the standalone Fulcro Inspect (Electron) app running on localhost:8237.
            :inspect     {:jvm-opts ["-Dtui.inspect=true"]}
 
            ;; Plain nREPL server. Combine after another alias so that alias's deps/paths load and
-           ;; this alias's :main-opts win, e.g. `clojure -M:demo-server:nrepl` or `clojure -M:test:nrepl`.
+           ;; this alias's :main-opts win, e.g. `clojure -M:test:nrepl`.
            :nrepl       {:extra-deps {nrepl/nrepl {:mvn/version "1.5.1"}}
-                         :main-opts  ["-m" "nrepl.cmdline" "--port" "0"]}
-
-           ;; JVM-only integration tests for the full-stack demo (Datomic Local server + model).
-           ;; These live in src/demo-test (NOT src/test) so the library runner `clojure -M:test:test-runner`
-           ;; never tries to load them without the demo/datomic classpath. Run with:
-           ;;   clojure -M:demo-server:test:demo-test
-           ;; (:demo-server -> datomic + src/demo; :test -> fulcro-spec; :demo-test -> runner + specs).
-           :demo-test   {:extra-paths ["src/demo-test"]
-                         :extra-deps  {io.github.cognitect-labs/test-runner
-                                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
-                         :jvm-opts    ["-Dguardrails.enabled=true"
-                                       "-Dguardrails.config=guardrails-test.edn"]
-                         :main-opts   ["-m" "cognitect.test-runner"
-                                       "-d" "src/demo-test" "-r" ".*-spec$"]}}}
+                         :main-opts  ["-m" "nrepl.cmdline" "--port" "0"]}}}
