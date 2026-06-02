@@ -29,6 +29,7 @@
     [clojure.spec.alpha :as s]
     [com.fulcrologic.fulcro.algorithms.tx-processing.synchronous-tx-processing :as stx]
     [com.fulcrologic.fulcro.raw.application :as rapp]
+    [com.fulcrologic.fulcro.react.hooks :as hooks]
     [com.fulcrologic.fulcro.tui.elements :as elements]
     [com.fulcrologic.fulcro.tui.engine :as engine]
     [com.fulcrologic.fulcro.tui.perf :as perf :refer [p]]
@@ -536,6 +537,9 @@ size change (`t-on-resize!` → `render!`), sets initial focus to the first node
   [app terminal]
   [any? any? => any?]
   (swap! (runtime-atom-key app) assoc ::terminal terminal)
+  ;; Hook setters (e.g. `use-state`) run outside render and must request a repaint to reflect the new
+  ;; state; wire that callback to the driver's throttled render so component-local hook state is live.
+  (hooks/set-render-callback! app (fn [] (request-render! app)))
   (term/t-enter! terminal)
   ;; Repaint when the terminal is resized. `render!` reads the fresh size and full-repaints with a
   ;; clear, so the layout self-corrects without waiting for a keypress. Routed through

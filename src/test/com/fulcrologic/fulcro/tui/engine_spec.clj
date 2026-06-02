@@ -686,7 +686,7 @@
       "calls the class :render, returning its node with props flowing in"
       (engine/render-instance instance) => (elements/button {:id "plain-3"} "Click"))))
 
-(specification {:covers {`engine/render-tree "004531,3fbfe0"}} "render-tree"
+(specification {:covers {`engine/render-tree "eb9572,0da94c"}} "render-tree"
   (component "scalars and nil"
     (assertions
       "passes a string through unchanged"
@@ -719,7 +719,7 @@
         "a render returning a vector yields a vector of sibling nodes"
         tree => [(elements/text {} "a") (elements/text {} "b")]))))
 
-(specification {:covers {`engine/render-root "b79137,995877"}} "render-root"
+(specification {:covers {`engine/render-root "f0c7e1,56c803"}} "render-root"
   (let [tree (engine/render-root Plain {:p/id 5 :p/label "Root"})]
     (assertions
       "builds the root instance via factory and walks it to a pure node tree"
@@ -1400,7 +1400,7 @@
       "current-focus also reads from a bare state-map"
       (engine/current-focus {::engine/focus "name"}) => "name")))
 
-(specification {:covers {`engine/process-key! "842938,8e3bf6"}} "process-key!"
+(specification {:covers {`engine/process-key! "842938,bc67eb"}} "process-key!"
   (component "Enter or Space activates a focused button"
     (let [app (build-driver-app)
           sa  (:com.fulcrologic.fulcro.application/state-atom app)]

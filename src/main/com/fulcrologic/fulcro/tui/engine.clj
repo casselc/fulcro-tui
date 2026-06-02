@@ -24,6 +24,8 @@
     [com.fulcrologic.fulcro.components :as comp]
     [com.fulcrologic.fulcro.raw.application :as rapp]
     [com.fulcrologic.fulcro.raw.components :as rc]
+    [com.fulcrologic.fulcro.react.hooks :as hooks]
+    [com.fulcrologic.fulcro.react.hooks-context :as hooks-ctx]
     [com.fulcrologic.fulcro.tui.perf :as perf :refer [p]]
     [com.fulcrologic.guardrails.core :refer [=> >def >defn >defn- ?]]))
 
@@ -1130,19 +1132,23 @@ writes non-blank cells and would otherwise leave stale content from the previous
 
 (>defn- render-children
   "Returns a vector of the results of `render-tree` over each child in `children`,
-dropping `nil` results and splicing vector results in as siblings."
+dropping `nil` results and splicing vector results in as siblings. Each child is rendered with
+`hooks/*child-index*` bound to its positional index so that the hook render-path of a child
+COMPONENT is stable across renders (this is what makes `use-state` etc. work — see `render-tree`)."
   [children]
   [sequential? => vector?]
-  (persistent!
-    (reduce
-      (fn [acc c]
-        (let [r (render-tree c)]
-          (cond
-            (nil? r) acc
-            (vector? r) (reduce conj! acc r)
-            :else (conj! acc r))))
-      (transient [])
-      children)))
+  (let [idx (volatile! -1)]
+    (persistent!
+      (reduce
+        (fn [acc c]
+          (vswap! idx inc)
+          (let [r (binding [hooks/*child-index* (atom @idx)] (render-tree c))]
+            (cond
+              (nil? r) acc
+              (vector? r) (reduce conj! acc r)
+              :else (conj! acc r))))
+        (transient [])
+        children))))
 
 (>defn render-tree
   "Returns a pure TUI node tree for `x`, recursively replacing every component
@@ -1171,12 +1177,26 @@ nodes; otherwise it returns a single node (or scalar)."
       (assoc x ::children (render-children (::children x)))
 
       (rc/component-instance? x)
-      (binding [comp/*parent* x]
-        (let [output (render-instance x)]
-          (cond
-            (nil? output) nil
-            (vector? output) (render-children output)
-            :else (render-tree output))))
+      ;; Establish the hook render context for this component (mirrors c.f.f.headless): a stable
+      ;; render-path (parent-path + this component's react-key or positional child index) plus fresh
+      ;; per-component hook/child indices. With this bound, `hooks/use-state` (and friends) persist
+      ;; component-local state in the app runtime atom keyed by path — so it survives the fact that
+      ;; every render rebuilds the component instance — and is naturally distinct per to-many row.
+      (let [child-idx (when hooks/*child-index* @hooks/*child-index*)
+            react-key (some-> x :props :fulcro$reactKey)
+            segment   (if react-key [:key react-key] (or child-idx 0))
+            new-path  (conj (or hooks-ctx/*current-path* []) segment)]
+        (binding [comp/*parent*            x
+                  hooks-ctx/*current-path* new-path
+                  hooks/*hook-index*       (atom 0)
+                  hooks/*child-index*      (atom -1)]
+          (hooks/record-rendered-path! new-path)
+          (let [output (render-instance x)]
+            (hooks/mark-mounted! new-path)
+            (cond
+              (nil? output) nil
+              (vector? output) (render-children output)
+              :else (render-tree output)))))
 
       (or (string? x) (number? x)) x
 
@@ -1193,10 +1213,23 @@ so the app and shared props are stamped onto the instances the factories create.
   ([class props] [::component-class map? => any?] (render-root class props nil))
   ([class props app]
    [::component-class map? any? => any?]
-   (binding [comp/*app*    app
-             comp/*parent* nil
-             comp/*shared* (some-> app comp/shared)]
-     (render-tree ((comp/factory class) props)))))
+   ;; Root of the hook render context (mirrors c.f.f.headless/render-app-tree): start the render-path at
+   ;; [], give this frame fresh effect/rendered-path collectors, then after the walk run any scheduled
+   ;; effects and unmount (clean up) the hook state of components that did not render this frame.
+   (let [rt-atom    (:com.fulcrologic.fulcro.application/runtime-atom app)
+         prev-paths (set (keys (get (some-> rt-atom deref) ::hooks/hook-registry)))]
+     (binding [comp/*app*               app
+               comp/*parent*            nil
+               comp/*shared*            (some-> app comp/shared)
+               hooks-ctx/*current-path* []
+               hooks/*hook-index*       (atom 0)
+               hooks/*child-index*      (atom -1)
+               hooks/*pending-effects*  (atom [])
+               hooks/*rendered-paths*   (atom #{})]
+       (let [tree (render-tree ((comp/factory class) props))]
+         (hooks/cleanup-unmounted-components! prev-paths @hooks/*rendered-paths*)
+         (hooks/run-pending-effects!)
+         tree)))))
 
 ;; ----------------------------------------------------------------------------
 ;; Node-query / interaction utilities
@@ -2170,15 +2203,21 @@ identity, so the cache can never go stale."
         rt-atom    (:com.fulcrologic.fulcro.application/runtime-atom app)
         rt         (some-> rt-atom deref)
         root-class (:com.fulcrologic.fulcro.application/root-class rt)
-        cache      (::node-tree-cache rt)]
+        cache      (::node-tree-cache rt)
+        ;; The tree also depends on hook state (e.g. `use-state`), which lives in the runtime atom — NOT
+        ;; the state-map. A hook setter swaps the registry, so include its identity in the cache key or a
+        ;; buffered input edited via `use-state` would never repaint.
+        hooks-reg  (get rt ::hooks/hook-registry)]
     (cond
-      (and cache (identical? (:state cache) state-map)) (:tree cache)
+      (and cache (identical? (:state cache) state-map) (identical? (:hooks cache) hooks-reg)) (:tree cache)
       (and state-map root-class)
-      (let [query (rc/get-query root-class state-map)
-            props (fdn/db->tree query state-map state-map)
-            tree  (binding [*current-focus* (get state-map ::focus)]
-                    (render-root root-class props app))]
-        (when rt-atom (swap! rt-atom assoc ::node-tree-cache {:state state-map :tree tree}))
+      (let [query     (rc/get-query root-class state-map)
+            props     (fdn/db->tree query state-map state-map)
+            tree      (binding [*current-focus* (get state-map ::focus)]
+                        (render-root root-class props app))
+            ;; render-root mounts/cleans up hooks, so re-read the registry identity for the cache key.
+            hooks-reg (get (some-> rt-atom deref) ::hooks/hook-registry)]
+        (when rt-atom (swap! rt-atom assoc ::node-tree-cache {:state state-map :hooks hooks-reg :tree tree}))
         tree)
       :else nil)))
 
