@@ -356,6 +356,21 @@
         "quit! leaves the terminal"
         (:left? @(.-state t)) => true)))
 
+  (component "quit! JOINS the render thread before leaving (so no frame paints onto the restored screen)"
+    (let [app    (new-app)
+          t      (term/string-terminal {:rows 10 :cols 30})
+          handle (app/mount! app {:terminal t :max-fps 120})]
+      (Thread/sleep 30)                                     ; let the dedicated render thread spin up
+      (app/quit! handle)
+      (assertions
+        ;; The bug: quit! only FLAGGED the render loop, then immediately left the terminal — so an
+        ;; in-flight paint could land on the just-restored screen. The fix joins the thread first, so
+        ;; by the time quit! returns the render thread is provably gone.
+        "the dedicated render thread has exited by the time quit! returns (joined, not just flagged)"
+        (.isAlive ^Thread (:render-thread handle)) => false
+        "quit! still flips running? false and leaves the terminal"
+        [(deref (:running? handle)) (:left? @(.-state t))] => [false true])))
+
   (component "a loop-level global keymap dispatches reserved chords (e.g. quit) regardless of focus"
     (let [app   (new-app)
           fired (atom false)

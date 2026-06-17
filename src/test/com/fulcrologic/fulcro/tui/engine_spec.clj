@@ -281,6 +281,38 @@
                               {:x 0 :y 0 :w 10 :h 2})))
       => [5 5]))
 
+  (component "grow distribution yields whole-cell sizes (no fractional coordinates)"
+    (assertions
+      ;; A SINGLE grow child already got an integer (it takes the leftover remainder); the bug only bit
+      ;; with TWO+ grow children, where the non-last ones go through (quot (* leftover w) total-w) — and
+      ;; quot of DOUBLES returns a double, leaking floats into the placed rects.
+      "two float-weighted :grow children split the leftover into integers, not doubles"
+      (let [ws (mapv :w (child-rects (engine/place
+                                       (elements/hbox {} (elements/box {:grow 1.0}) (elements/box {:grow 1.0}))
+                                       {:x 0 :y 0 :w 11 :h 1})))]
+        [ws (mapv integer? ws)])
+      => [[5 6] [true true]]
+      "unequal float weights still partition the whole extent as integers, remainder to the last"
+      (mapv :w (child-rects (engine/place
+                              (elements/hbox {} (elements/box {:grow 1.0}) (elements/box {:grow 2.0}))
+                              {:x 0 :y 0 :w 10 :h 1})))
+      => [3 7]
+      "placed x-coords stay integers with multiple float-weighted grow children"
+      (mapv :x (child-rects (engine/place
+                              (elements/hbox {} (elements/box {:grow 1.0}) (elements/text {} "x") (elements/box {:grow 1.0}))
+                              {:x 0 :y 0 :w 30 :h 1})))
+      => [0 14 15]
+      ;; Regression: before the fix, the double coordinates made put-cell's vector assoc throw
+      ;; \"IllegalArgumentException: Key must be integer\" during paint.
+      "a tree with multiple float-weighted :grow children renders without throwing"
+      (let [row (first (engine/screen (engine/render-buffer
+                                        (engine/place
+                                          (elements/hbox {} (elements/box {:grow 1.0}) (elements/text {} "x") (elements/box {:grow 1.0}))
+                                          {:x 0 :y 0 :w 30 :h 1})
+                                        1 30)))]
+        [(count row) (str/index-of row "x")])
+      => [30 14]))
+
   (component "cross-axis alignment"
     (assertions
       "centers a narrower child within the container width"
@@ -288,6 +320,78 @@
                               (engine/place (elements/vbox {} (elements/text {:width 4 :align :center} "x"))
                                 {:x 0 :y 0 :w 10 :h 1}))))
       => {:x 3 :y 0 :w 4 :h 1}))
+
+  (component "main-axis justify"
+    (let [xs (fn [w attrs]
+               ;; three 2-wide boxes (6 used) in a w-wide hbox => (w - 6) cells of slack to distribute
+               (mapv :x (child-rects
+                          (engine/place
+                            (elements/hbox attrs
+                              (elements/box {:width 2}) (elements/box {:width 2}) (elements/box {:width 2}))
+                            {:x 0 :y 0 :w w :h 1}))))
+          x1 (fn [attrs]
+               ;; a single 2-wide box in an 18-wide hbox => 16 cells of slack (exercises the n=1 paths)
+               (-> (engine/place (elements/hbox attrs (elements/box {:width 2})) {:x 0 :y 0 :w 18 :h 1})
+                 ::engine/children first ::engine/rect :x))]
+      (assertions
+        ;; w=18 => 12 cells of slack, evenly divisible by 2/3/4 (clean gaps, no rounding)
+        "defaults to :start — children packed at the near edge, leftover unused (unchanged behavior)"
+        (xs 18 {}) => [0 2 4]
+        "an explicit :start matches the default"
+        (xs 18 {:justify :start}) => [0 2 4]
+        ":center centers the packed block of children"
+        (xs 18 {:justify :center}) => [6 8 10]
+        ":end pushes the packed block to the far edge"
+        (xs 18 {:justify :end}) => [12 14 16]
+        ":space-between spreads the slack into the gaps between children, none at the ends"
+        (xs 18 {:justify :space-between}) => [0 8 16]
+        ":space-around surrounds each child with equal space (half-size at the ends)"
+        (xs 18 {:justify :space-around}) => [2 8 14]
+        ":space-evenly makes every gap, including the ends, equal"
+        (xs 18 {:justify :space-evenly}) => [3 8 13]
+
+        ;; w=17 => 11 cells of slack: NOT divisible, so quot truncation drops a cell or two (pin rounding)
+        ":end always reaches the far edge even with an odd remainder (lead = whole slack)"
+        (xs 17 {:justify :end}) => [11 13 15]
+        ":space-between truncates the gap via quot; the last child need not reach the far edge"
+        (xs 17 {:justify :space-between}) => [0 7 14]
+        ":space-around truncates via quot with an odd remainder"
+        (xs 17 {:justify :space-around}) => [1 6 11]
+        ":space-evenly truncates via quot with an odd remainder"
+        (xs 17 {:justify :space-evenly}) => [2 6 10]
+
+        ;; single child (n=1): :space-between must fall back to :start (guards (dec n)=0 divide-by-zero)
+        ":center moves a lone child to the middle"
+        (x1 {:justify :center}) => 8
+        ":end moves a lone child to the far edge"
+        (x1 {:justify :end}) => 16
+        ":space-between falls back to :start for a lone child (no divide-by-zero on (dec n))"
+        (x1 {:justify :space-between}) => 0
+        ":space-around centers a lone child"
+        (x1 {:justify :space-around}) => 8
+        ":space-evenly centers a lone child"
+        (x1 {:justify :space-evenly}) => 8))
+    (assertions
+      "an empty justified container places no children (n=0 guard; no divide-by-zero in space-around)"
+      (child-rects (engine/place (elements/hbox {:justify :space-around}) {:x 0 :y 0 :w 18 :h 1})) => []
+      "is inert when a :grow child already absorbs the leftover space"
+      (child-rects (engine/place
+                     (elements/hbox {:justify :center}
+                       (elements/box {:width 2}) (elements/box {:grow 1}) (elements/box {:width 2}))
+                     {:x 0 :y 0 :w 18 :h 1}))
+      => [{:x 0 :y 0 :w 2 :h 1} {:x 2 :y 0 :w 14 :h 1} {:x 16 :y 0 :w 2 :h 1}]
+      "applies on the main (vertical) axis of a vbox too"
+      (mapv :y (child-rects (engine/place
+                              (elements/vbox {:justify :end}
+                                (elements/box {:height 2}) (elements/box {:height 2}))
+                              {:x 0 :y 0 :w 4 :h 12})))
+      => [8 10]
+      "applies to a :modal's vertically-stacked children too"
+      (mapv :y (child-rects (engine/place
+                              (elements/modal {:border? false :justify :end}
+                                (elements/box {:height 2}) (elements/box {:height 2}))
+                              {:x 0 :y 0 :w 10 :h 12})))
+      => [8 10]))
 
   (component "insets"
     (assertions
