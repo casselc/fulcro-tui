@@ -318,14 +318,16 @@
         ":space-evenly makes every gap, including the ends, equal"
         (xs 18 {:justify :space-evenly}) => [3 8 13]
 
-        ;; w=17 => 11 cells of slack: NOT divisible, so quot truncation drops a cell or two (pin rounding)
+        ;; w=17 => 11 cells of slack, NOT evenly divisible: every gap is a uniform quot, and the cells
+        ;; quot discards collect ENTIRELY as the trailing margin at the far end (NOT one-per-gap). That
+        ;; trailing remainder can be several cells, so the last child can fall well short of the far edge.
         ":end always reaches the far edge even with an odd remainder (lead = whole slack)"
         (xs 17 {:justify :end}) => [11 13 15]
-        ":space-between truncates the gap via quot; the last child need not reach the far edge"
+        ":space-between — gaps both 5 (equal); 1 leftover cell sits at the far end, so the last child stops at 14 (1 short of 15)"
         (xs 17 {:justify :space-between}) => [0 7 14]
-        ":space-around truncates via quot with an odd remainder"
+        ":space-around — lead 1, gaps both 3; the 4-cell remainder is the trailing margin, last child at 11 (4 short of 15)"
         (xs 17 {:justify :space-around}) => [1 6 11]
-        ":space-evenly truncates via quot with an odd remainder"
+        ":space-evenly — lead 2, gaps both 2; the 5-cell remainder is the trailing margin, last child at 10 (5 short of 15)"
         (xs 17 {:justify :space-evenly}) => [2 6 10]
 
         ;; single child (n=1): :space-between must fall back to :start (guards (dec n)=0 divide-by-zero)

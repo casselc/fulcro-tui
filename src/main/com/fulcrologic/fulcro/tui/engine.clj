@@ -346,12 +346,20 @@ of the extent (rounded); `nil` (or anything else) falls back to the intrinsic si
 under the `justify` keyword — the main-axis counterpart of `align-offset` (which positions a single
 child on the cross axis). `lead` is the offset before the first child; `gap` is the extra space inserted
 between each adjacent pair. `:center`/`:middle` center the packed block; `:end`/`:right`/`:bottom` push
-it to the far edge; `:space-between` spreads the slack into the gaps between children (none at the ends;
-a single child falls back to `:start`); `:space-around` surrounds each child with equal space (half-size
-at the ends); `:space-evenly` makes
-every gap, including the ends, equal; anything else (default `:start`) packs at the near edge. When
-`free` is 0 (e.g. a `:grow` child already absorbed the slack) every result is `[0 0]`, so justify is
-inert."
+it to the far edge; `:space-between` spreads the slack into the gaps between children (a single child
+falls back to `:start`); `:space-around` surrounds each child with equal space (half at the ends);
+`:space-evenly` spreads it into equal gaps including the ends; anything else (default `:start`) packs at
+the near edge.
+
+Splits are UNIFORM WHOLE CELLS: the `lead` margin and every inter-child `gap` are a single floored
+`quot`, so all gaps are EQUAL. The cells `quot` discards (`free` minus what `lead`+gaps consume) are NOT
+spread one-per-gap — they ALL collect as the TRAILING margin at the far end. That trailing remainder can
+be SEVERAL cells (roughly up to the divisor used — `n-1` for `:space-between`, `n` for `:space-around`,
+`n+1` for `:space-evenly`), so for `:space-around`/`:space-evenly` the far margin can visibly exceed the
+near margin and the last child can fall well short of the far edge — it is NOT bounded to one cell. Two
+exceptions: `:end`'s `lead` is the whole slack, so it always reaches the far edge; `:center` splits
+floor/ceil, so its leading vs trailing margin differ by at most one. When `free` is 0 (e.g. a `:grow`
+child already absorbed the slack) every result is `[0 0]`, so justify is inert."
   [justify free n]
   [any? nat-int? nat-int? => (s/tuple nat-int? nat-int?)]
   (if (zero? n)

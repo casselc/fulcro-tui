@@ -313,10 +313,15 @@ aliases) positions it within the track.
 
 On the *main axis*, when the children do not fill it (i.e. no `:grow` child absorbs the
 slack), the container's `:justify` attribute positions them: `:start` (default — packed at
-the near edge), `:center`, `:end`, `:space-between` (slack split into the gaps between
-children, none at the ends), `:space-around` (equal space surrounding each child, half-size
-at the ends), or `:space-evenly` (every gap, including the ends, equal). In short — `:align`
-is per-child *cross-axis* placement; `:justify` is the container's *main-axis* distribution.
+the near edge), `:center`, `:end`, `:space-between` (slack into the gaps between children),
+`:space-around` (space surrounding each child, half at the ends), or `:space-evenly` (equal
+gaps including the ends). In short — `:align` is per-child *cross-axis* placement; `:justify`
+is the container's *main-axis* distribution. Slack is divided in *uniform whole cells*
+(`quot`), so every gap is equal; when it does not divide evenly the discarded cells are not
+spread one-per-gap — they collect entirely as the trailing margin at the far end. That
+remainder can be *several* cells (for `:space-around`/`:space-evenly` the far margin can
+noticeably exceed the near one), so the last child can fall short of the far edge — except
+`:end`, whose lead is the whole slack and so always reaches it.
 
 [source,clojure]
 -----
