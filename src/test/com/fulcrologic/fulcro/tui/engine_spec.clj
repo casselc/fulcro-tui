@@ -1749,19 +1749,92 @@
   (gen/fmap (fn [[w h]] {:x 0 :y 0 :w w :h h})
     (gen/tuple (gen/choose 0 40) (gen/choose 0 20))))
 
+(defn- container-children-sane?
+  "For a placed `:hbox`/`:vbox` (no insets in these generators), its direct children are NON-OVERLAPPING
+   and in order along the MAIN axis, and fully CONTAINED on the CROSS axis (place-stack mins cross-size to
+   the track). Both hold for ANY valid layout, even when the main axis overflows the track."
+  [placed]
+  (let [{:keys [x y w h]} (::engine/rect placed)
+        hbox? (= :hbox (::engine/tag placed))
+        kids  (mapv ::engine/rect (filter engine/node? (::engine/children placed)))]
+    (and
+      ;; cross-axis containment (vertical for an hbox, horizontal for a vbox)
+      (every? (fn [r] (if hbox?
+                        (and (>= (:y r) y) (<= (+ (:y r) (:h r)) (+ y h)))
+                        (and (>= (:x r) x) (<= (+ (:x r) (:w r)) (+ x w)))))
+        kids)
+      ;; main-axis: each child's far edge is at-or-before the next child's near edge (ordered, no
+      ;; overlap; any :justify gap is >= 0)
+      (every? (fn [[a b]] (if hbox? (<= (+ (:x a) (:w a)) (:x b)) (<= (+ (:y a) (:h a)) (:y b))))
+        (partition 2 1 kids)))))
+
 (def ^:private clean-coords-prop
   (prop/for-all [tree tree-gen rect viewport-gen]
     (let [placed (engine/place tree rect)]
       (and (every? (fn [r] (and (nat-int? (:x r)) (nat-int? (:y r))
                                 (nat-int? (:w r)) (nat-int? (:h r))))
              (all-rects placed))
+           ;; children ordered/non-overlapping on the main axis, contained on the cross axis
+           (container-children-sane? placed)
            ;; painting any generated tree must not throw (a fractional/negative coord would)
            (do (engine/render-buffer placed (max 1 (:h rect)) (max 1 (:w rect))) true)))))
 
+(def ^:private fitting-box-gen
+  ;; Children that PROVABLY fit a large-enough track: a small fixed size, or a grow weight (which only
+  ;; ever consumes leftover). No :half/:fraction here — several of those can sum past the track.
+  (gen/bind gen/boolean
+    (fn [grow?]
+      (if grow?
+        (gen/fmap (fn [g] (elements/box {:grow g})) (gen/elements [1 2 1.0]))
+        (gen/fmap (fn [s] (elements/box {:width s :height s})) (gen/choose 1 5))))))
+
+(def ^:private fitting-containment-prop
+  ;; A track >= 30 holds <=6 fixed children (<=5 each => <=30); grow children fill leftover; the cross
+  ;; track (8) holds every <=5 cross size. So every child is FULLY contained on BOTH axes.
+  (prop/for-all [axis (gen/elements [:h :v])
+                 kids (gen/vector fitting-box-gen 0 6)
+                 ext  (gen/choose 30 48)]
+    (let [tree   (apply (if (= axis :h) elements/hbox elements/vbox) {} kids)
+          rect   (if (= axis :h) {:x 0 :y 0 :w ext :h 8} {:x 0 :y 0 :w 8 :h ext})
+          placed (engine/place tree rect)
+          {:keys [x y w h]} (::engine/rect placed)]
+      (every? (fn [r] (and (>= (:x r) x) (>= (:y r) y)
+                           (<= (+ (:x r) (:w r)) (+ x w))
+                           (<= (+ (:y r) (:h r)) (+ y h))))
+        (mapv ::engine/rect (filter engine/node? (::engine/children placed)))))))
+
+(def ^:private clamp-scroll-prop
+  (prop/for-all [sx (gen/choose -20 60) sy (gen/choose -20 60)
+                 vw (gen/choose 0 50)   vh (gen/choose 0 50)
+                 ww (gen/choose 0 50)   wh (gen/choose 0 50)]
+    (let [virtual {:w vw :h vh} view {:w ww :h wh}
+          {:keys [x y]} (engine/clamp-scroll {:x sx :y sy} virtual view)]
+      (and (<= 0 x (max 0 (- vw ww)))
+           (<= 0 y (max 0 (- vh wh)))
+           ;; idempotent: clamping an already-clamped offset is a no-op
+           (= {:x x :y y} (engine/clamp-scroll {:x x :y y} virtual view))))))
+
+(def ^:private scroll-to-show-prop
+  ;; rw/rh <= 6 <= vw/vh, so the target FITS the view on both axes — scroll-to-show must then make each
+  ;; axis FULLY visible: result <= near AND far <= result + view.
+  (prop/for-all [sx (gen/choose 0 40) sy (gen/choose 0 40)
+                 rx (gen/choose 0 40) ry (gen/choose 0 40)
+                 rw (gen/choose 0 6)  rh (gen/choose 0 6)
+                 vw (gen/choose 6 20) vh (gen/choose 6 20)]
+    (let [{:keys [x y]} (engine/scroll-to-show {:x sx :y sy} {:x rx :y ry :w rw :h rh} {:w vw :h vh})]
+      (and (<= x rx) (<= (+ rx rw) (+ x vw))
+           (<= y ry) (<= (+ ry rh) (+ y vh))))))
+
 (specification "place — generative layout invariants (property-based)"
   (assertions
-    "for random valid trees + viewports, every placed rect is a non-negative integer box and paint never throws"
-    (true? (:result (tc/quick-check 150 clean-coords-prop))) => true))
+    "random valid trees + viewports: rects are non-negative integer boxes; children are ordered & non-overlapping on the main axis and contained on the cross axis; paint never throws"
+    (true? (:result (tc/quick-check 150 clean-coords-prop))) => true
+    "fitting layouts: every child is fully contained within the parent content rect on both axes"
+    (true? (:result (tc/quick-check 150 fitting-containment-prop))) => true
+    "clamp-scroll keeps the offset within [0, max(0, virtual-view)] on each axis and is idempotent"
+    (true? (:result (tc/quick-check 200 clamp-scroll-prop))) => true
+    "scroll-to-show makes a view-fitting target fully visible on each axis"
+    (true? (:result (tc/quick-check 200 scroll-to-show-prop))) => true))
 
 ;; NOTE: element-generator specs (`elements/element`, `elements/focused?`, `elements/picker`)
 ;; live in `com.fulcrologic.fulcro.tui.elements-spec`.
