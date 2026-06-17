@@ -341,6 +341,37 @@ of the extent (rounded); `nil` (or anything else) falls back to the intrinsic si
     (:end :right :bottom) (max 0 (- extent size))
     0))
 
+(>defn- justify-spacing
+  "Returns `[lead gap]` for distributing `free` leftover main-axis cells across `n` stacked children
+under the `justify` keyword — the main-axis counterpart of `align-offset` (which positions a single
+child on the cross axis). `lead` is the offset before the first child; `gap` is the extra space inserted
+between each adjacent pair. `:center`/`:middle` center the packed block; `:end`/`:right`/`:bottom` push
+it to the far edge; `:space-between` spreads the slack into the gaps between children (a single child
+falls back to `:start`); `:space-around` surrounds each child with equal space (half at the ends);
+`:space-evenly` spreads it into equal gaps including the ends; anything else (default `:start`) packs at
+the near edge.
+
+Splits are UNIFORM WHOLE CELLS: the `lead` margin and every inter-child `gap` are a single floored
+`quot`, so all gaps are EQUAL. The cells `quot` discards (`free` minus what `lead`+gaps consume) are NOT
+spread one-per-gap — they ALL collect as the TRAILING margin at the far end. That trailing remainder can
+be SEVERAL cells (roughly up to the divisor used — `n-1` for `:space-between`, `n` for `:space-around`,
+`n+1` for `:space-evenly`), so for `:space-around`/`:space-evenly` the far margin can visibly exceed the
+near margin and the last child can fall well short of the far edge — it is NOT bounded to one cell. Two
+exceptions: `:end`'s `lead` is the whole slack, so it always reaches the far edge; `:center` splits
+floor/ceil, so its leading vs trailing margin differ by at most one. When `free` is 0 (e.g. a `:grow`
+child already absorbed the slack) every result is `[0 0]`, so justify is inert."
+  [justify free n]
+  [any? nat-int? nat-int? => (s/tuple nat-int? nat-int?)]
+  (if (zero? n)
+    [0 0]
+    (case justify
+      (:center :middle)     [(quot free 2) 0]
+      (:end :right :bottom) [free 0]
+      :space-between        (if (> n 1) [0 (quot free (dec n))] [0 0])
+      :space-around         (let [g (quot free n)] [(quot g 2) g])
+      :space-evenly         (let [g (quot free (inc n))] [g g])
+      [0 0])))
+
 (>defn- main-content-size
   "Returns the content-driven main-axis size of child `c` being stacked along `main-attr`
 (`:height` for a vbox, `:width` for an hbox) given the `cross-extent` (the cross-axis track size
@@ -358,15 +389,22 @@ child's ordinary intrinsic size on the main axis."
 (>defn- distribute-main
   "Returns a vector of resolved main-axis sizes (one per child) that partition `extent`. Children
 with a `:grow` weight share the space left over after fixed/fraction/content-sized children;
-leftover is split by weight with any rounding remainder given to the last grow child. `cross-extent`
-is the cross-axis track size each child will fill, used to resolve height-for-width wrapping text."
+leftover is split by weight with any rounding remainder given to the last grow child. Each grow size
+is floored to a whole cell (`long`) — so non-integer `:grow` weights (e.g. `1.0`) still yield integer
+sizes and never leak fractional coordinates into the placed rects (which the paint pass uses as vector
+indices). Only a FINITE POSITIVE `:grow` weight grows: `0`, a negative, `NaN`, `Infinity`, or a
+non-number is treated as no-grow (the child takes its fixed/intrinsic size) instead of crashing the
+`(long (quot …))` share math. `cross-extent` is the cross-axis track size each child will fill, used to
+resolve height-for-width wrapping text."
   [extent cross-extent children main-attr]
   [nat-int? nat-int? (s/coll-of ::node) keyword? => (s/coll-of nat-int?)]
   (let [info       (mapv (fn [c]
                            (let [a    (::attrs c)
+                                 g    (:grow a)
+                                 grow (when (and (number? g) (pos? g) (not (Double/isInfinite (double g)))) g)
                                  intr (main-content-size c cross-extent main-attr)]
-                             {:grow  (:grow a)
-                              :fixed (when-not (:grow a)
+                             {:grow  grow
+                              :fixed (when-not grow
                                        (resolve-size (get a main-attr) extent intr))}))
                      children)
         used       (reduce + 0 (keep :fixed info))
@@ -377,7 +415,7 @@ is the cross-axis track size each child will fill, used to resolve height-for-wi
                      (loop [acc [], rem leftover, ws weights]
                        (if (seq ws)
                          (let [w  (first ws)
-                               sz (if (= 1 (count ws)) rem (quot (* leftover w) total-w))]
+                               sz (long (if (= 1 (count ws)) rem (quot (* leftover w) total-w)))]
                            (recur (conj acc sz) (- rem sz) (rest ws)))
                          acc))
                      [])]
@@ -418,40 +456,49 @@ coercion. Built-in tags are handled by `:default`; an unregistered custom tag is
 
 (>defn place-stack
   "Places `children` within the `content` rectangle along `axis` (`:v` stacks vertically, `:h`
-horizontally). Main-axis sizes are distributed by `distribute-main`; on the cross axis each child
-fills the track unless it declares a size, in which case `:align` positions it. Returns the vector
-of placed children. Public so a custom container's `place` method can reuse the built-in
-`:vbox`/`:hbox` layout."
-  [axis content children]
-  [#{:v :h} ::rect (s/coll-of ::node) => vector?]
-  (let [vertical?    (= axis :v)
-        main-extent  (if vertical? (:h content) (:w content))
-        cross-extent (if vertical? (:w content) (:h content))
-        main-attr    (if vertical? :height :width)
-        cross-attr   (if vertical? :width :height)
-        main-sizes   (distribute-main main-extent cross-extent children main-attr)]
-    (loop [offset 0, cs (seq children), ms (seq main-sizes), out []]
-      (if cs
-        (let [c          (first cs)
-              msz        (first ms)
-              a          (::attrs c)
-              intr-cross (get (intrinsic-size c) (if vertical? :w :h))
-              cross-spec (get a cross-attr)
-              cross-size (if (some? cross-spec)
-                           (min cross-extent (resolve-size cross-spec cross-extent intr-cross))
-                           cross-extent)
-              cross-off  (align-offset (:align a) cross-extent cross-size)
-              rect       (if vertical?
-                           {:x (+ (:x content) cross-off) :y (+ (:y content) offset) :w cross-size :h msz}
-                           {:x (+ (:x content) offset) :y (+ (:y content) cross-off) :w msz :h cross-size})]
-          (recur (+ offset msz) (next cs) (next ms) (conj out (place c rect))))
-        out))))
+horizontally). Main-axis sizes are distributed by `distribute-main`; any leftover main-axis space (when
+no child `:grow`s to absorb it) is positioned by the container's `justify` keyword — `:start` (default),
+`:center`, `:end`, `:space-between`, `:space-around`, or `:space-evenly` (see `justify-spacing`). On the
+cross axis each child fills the track unless it declares a size, in which case its own `:align` positions
+it. Returns the vector of placed children. Public so a custom container's `place` method can reuse the
+built-in `:vbox`/`:hbox` layout; the 3-arity defaults `justify` to `:start`."
+  ([axis content children]
+   [#{:v :h} ::rect (s/coll-of ::node) => vector?]
+   (place-stack axis content children :start))
+  ([axis content children justify]
+   [#{:v :h} ::rect (s/coll-of ::node) any? => vector?]
+   (let [vertical?    (= axis :v)
+         main-extent  (if vertical? (:h content) (:w content))
+         cross-extent (if vertical? (:w content) (:h content))
+         main-attr    (if vertical? :height :width)
+         cross-attr   (if vertical? :width :height)
+         main-sizes   (distribute-main main-extent cross-extent children main-attr)
+         used         (reduce + 0 main-sizes)
+         free         (max 0 (long (- main-extent used)))
+         [lead gap]   (justify-spacing justify free (count children))]
+     (loop [offset lead, cs (seq children), ms (seq main-sizes), out []]
+       (if cs
+         (let [c          (first cs)
+               msz        (first ms)
+               a          (::attrs c)
+               intr-cross (get (intrinsic-size c) (if vertical? :w :h))
+               cross-spec (get a cross-attr)
+               cross-size (if (some? cross-spec)
+                            (min cross-extent (resolve-size cross-spec cross-extent intr-cross))
+                            cross-extent)
+               cross-off  (align-offset (:align a) cross-extent cross-size)
+               rect       (if vertical?
+                            {:x (+ (:x content) cross-off) :y (+ (:y content) offset) :w cross-size :h msz}
+                            {:x (+ (:x content) offset) :y (+ (:y content) cross-off) :w msz :h cross-size})]
+           (recur (+ offset msz gap) (next cs) (next ms) (conj out (place c rect))))
+         out)))))
 
 (>defn- internal-place
   "Lays out a BUILT-IN `node` within the outer `rect` (the `place` `:default`). `:vbox`/`:hbox`
 partition their content area among children (honoring fixed/`:half`/`:fraction`/`:grow`/content
-sizing and `:align`); `:box` fills its content area with each child; leaves keep their string/number
-children for the paint pass. `:border?`/`:padding` inset the content area.
+sizing, main-axis `:justify`, and cross-axis `:align`); `:box` fills its content area with each child;
+leaves keep their string/number children for the paint pass. `:border?`/`:padding` inset the content
+area.
 
 A `:viewport` is special: it has a bounded outer `::rect` (sized like any box), but its single
 child is laid out at the child's NATURAL height (and the viewport's content width) into a VIRTUAL
@@ -472,8 +519,8 @@ built-in leaves AND by an unregistered custom tag — so it must NOT re-enter `p
                  :w (max 0 (- (:w rect) l r))
                  :h (max 0 (- (:h rect) t b))}]
     (case tag
-      (:vbox :modal) (assoc node ::rect rect ::children (place-stack :v content (mapv as-node children)))
-      :hbox (assoc node ::rect rect ::children (place-stack :h content (mapv as-node children)))
+      (:vbox :modal) (assoc node ::rect rect ::children (place-stack :v content (mapv as-node children) (:justify attrs)))
+      :hbox (assoc node ::rect rect ::children (place-stack :h content (mapv as-node children) (:justify attrs)))
       :viewport
       (let [child        (as-node (first children))
             ;; A wrapping text inside a viewport wraps to the viewport's content width, so its

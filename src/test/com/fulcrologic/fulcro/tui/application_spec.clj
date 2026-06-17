@@ -48,6 +48,34 @@
 (defn- state [app]
   (deref (:com.fulcrologic.fulcro.application/state-atom app)))
 
+(defn- render-loop-of [app]
+  (:com.fulcrologic.fulcro.tui.application/render-loop
+    (deref (:com.fulcrologic.fulcro.application/runtime-atom app))))
+
+(defn- blocking-terminal
+  "A fake `Terminal` whose `t-read-key` BLOCKS until `:release` is delivered (then returns nil = EOF), so
+   the input loop stays parked and the dedicated render loop keeps running — letting a test exercise
+   off-input-thread repaints and live-loop teardown WITHOUT the input loop EOF-ing first (the render loop
+   must NOT outlive the terminal, so we can no longer lean on it surviving an immediate EOF). Returns
+   `{:terminal t :release p :left? a}`; `t-leave!` sets `:left?`. `t-size` is fixed at `rows`x`cols`."
+  ([] (blocking-terminal 10 30))
+  ([rows cols]
+   (let [release (promise)
+         left?   (atom false)]
+     {:terminal (reify term/Terminal
+                  (t-size [_] {:rows rows :cols cols})
+                  (t-read-key [_] @release)
+                  (t-write! [_ _] nil)
+                  (t-flush! [_] nil)
+                  (t-set-cursor! [_ _ _ _] nil)
+                  (t-enter! [_] nil)
+                  (t-leave! [_] (reset! left? true) nil)
+                  (t-sync-supported? [_] false)
+                  (t-enhanced-keys? [_] false)
+                  (t-on-resize! [_ _] nil))
+      :release release
+      :left?   left?})))
+
 ;; A root with a fixed-height viewport of many focusable items, for scrolling/follow-focus tests.
 (comp/defsc VPRoot [this _props]
   {:query         [:vp/x]
@@ -110,6 +138,86 @@
         (engine/current-focus app) => :a
         "the hardware cursor is shown at input :a's caret origin (0,0)"
         (term/cursor t) => {:x 0 :y 0 :visible? true}))))
+
+(specification "terminal restore on crash — JVM shutdown hook"
+  (let [hook-of (fn [app] (:com.fulcrologic.fulcro.tui.application/shutdown-hook
+                            (deref (:com.fulcrologic.fulcro.application/runtime-atom app))))]
+    (component "mount! installs a shutdown hook that leaves the terminal if the process dies before teardown"
+      (let [app    (new-app)
+            t      (term/string-terminal {:rows 10 :cols 30})
+            handle (app/mount! app {:terminal t})
+            hook   (hook-of app)]
+        (assertions
+          "mount! registered a JVM shutdown-hook Thread (stashed under ::shutdown-hook)"
+          (instance? Thread hook) => true)
+        ;; Isolate the hook's effect from the normal teardown: pretend the terminal was NOT yet left,
+        ;; then run the hook directly (the JVM runs it on an abnormal exit) and confirm it leaves it.
+        (swap! (.-state t) assoc :left? false)
+        (.run ^Thread hook)
+        (assertions
+          "running the hook leaves the terminal (restores alt-screen / auto-wrap / cursor / raw mode)"
+          (:left? @(.-state t)) => true)
+        (app/quit! handle)))
+
+    (component "mount! restores the terminal (and drops the hook) if attach! throws before the loop starts"
+      ;; attach! enters the alt-screen (t-enter!) then does the first paint; if either throws, the
+      ;; terminal must NOT be stranded in raw/alt-screen mode. The hook is installed BEFORE attach!, and
+      ;; the catch leaves the terminal immediately + deregisters the hook, then rethrows.
+      (let [app   (new-app)
+            left? (atom false)
+            t     (reify term/Terminal
+                    (t-size [_] {:rows 10 :cols 30})
+                    (t-read-key [_] nil)
+                    (t-write! [_ _] nil)
+                    (t-flush! [_] nil)
+                    (t-set-cursor! [_ _ _ _] nil)
+                    (t-enter! [_] (throw (ex-info "enter boom" {})))
+                    (t-leave! [_] (reset! left? true))
+                    (t-sync-supported? [_] false)
+                    (t-enhanced-keys? [_] false)
+                    (t-on-resize! [_ _] nil))]
+        (assertions
+          "mount! propagates the attach! failure to the caller"
+          (try (app/mount! app {:terminal t}) ::no-throw (catch Throwable _ ::threw)) => ::threw
+          "the terminal was left/restored despite the failure (not stranded in alt-screen)"
+          @left? => true
+          "the crash hook was deregistered after the failed mount (not leaked)"
+          (hook-of app) => nil)))
+
+    (component "re-mounting the same app REPLACES the hook rather than accumulating"
+      ;; The no-accumulation invariant holds regardless of WHEN the previous hook is deregistered: with
+      ;; this feature alone, install-terminal-restore-hook! drops the prior hook on the next mount!; with
+      ;; the centralized shutdown! (fix/dirty-terminal-on-exit), quit! already dropped it. Either way,
+      ;; after a mount!→quit!→mount! cycle the first hook is gone and the second is a distinct live hook —
+      ;; so this test passes both on this branch in isolation and on the integration. (We deliberately do
+      ;; NOT assert whether the hook survives the bare quit!, since that legitimately differs by config.)
+      (let [app   (new-app)
+            t1    (term/string-terminal {:rows 10 :cols 30})
+            h1    (app/mount! app {:terminal t1})
+            hook1 (hook-of app)
+            _     (app/quit! h1)
+            t2    (term/string-terminal {:rows 10 :cols 30})
+            h2    (app/mount! app {:terminal t2})
+            hook2 (hook-of app)]
+        (app/quit! h2)
+        (assertions
+          "the first mount! registered a hook Thread"
+          (instance? Thread hook1) => true
+          "re-mounting installs a DIFFERENT live hook Thread"
+          (instance? Thread hook2) => true
+          (identical? hook1 hook2) => false
+          "the previous hook is deregistered from the JVM (no accumulation; removeShutdownHook => false)"
+          (.removeShutdownHook (Runtime/getRuntime) ^Thread hook1) => false)))
+
+    (component "run-blocking! deregisters the hook after a clean session (no hook accumulation)"
+      (let [app (new-app)
+            t   (term/string-terminal {:rows 10 :cols 30 :keys [{:key "a" :char "a"}]})]
+        (app/run-blocking! app {:terminal t :max-fps 120})
+        (assertions
+          "after a clean run-blocking! session the ::shutdown-hook entry is cleared"
+          (hook-of app) => nil
+          "the terminal was left normally"
+          (:left? @(.-state t)) => true)))))
 
 (specification {:covers {`app/step! "6b509b,7a63d8"}} "step! — focus, typing, and activation"
   (component "Tab moves focus and follows the cursor to the newly focused input"
@@ -356,6 +464,109 @@
         "quit! leaves the terminal"
         (:left? @(.-state t)) => true)))
 
+  (component "quit! JOINS+CLEARS the render loop before leaving (so no frame paints onto the restored screen)"
+    ;; Blocking terminal so the input loop is parked and the render loop is genuinely LIVE when quit! runs
+    ;; (otherwise the input-loop finally would already have torn it down on EOF, making the join moot).
+    (let [app    (new-app)
+          {:keys [terminal release left?]} (blocking-terminal 10 30)
+          handle (app/mount! app {:terminal terminal :max-fps 120})]
+      (Thread/sleep 30)                                     ; let the dedicated render thread spin up
+      (app/quit! handle)
+      (deliver release nil)                                 ; unblock the parked read so the input thread can end
+      (assertions
+        ;; The bug: quit! only FLAGGED the render loop, then immediately left the terminal — so an
+        ;; in-flight paint could land on the just-restored screen. shutdown! joins the thread first, so
+        ;; by the time quit! returns the render thread is provably gone.
+        "the dedicated render thread has exited by the time quit! returns (joined, not just flagged)"
+        (.isAlive ^Thread (:render-thread handle)) => false
+        ;; D: the runtime ::render-loop entry is removed, so a later request-render! does not enqueue onto
+        ;; a dead thread (it falls back to a synchronous render, like a freshly-attached app).
+        "the ::render-loop runtime entry is cleared"
+        (render-loop-of app) => nil
+        "quit! still flips running? false and leaves the terminal"
+        [(deref (:running? handle)) @left?] => [false true])))
+
+  (component "EOF exit tears down fully too (not only quit!): render thread stopped, ::render-loop cleared, terminal left"
+    ;; Regression for the dirty-terminal fix's blind spot: run-blocking! reaching EOF used to leave the
+    ;; terminal but leave the render thread ALIVE (it would then paint a closed terminal / leak a daemon).
+    (let [app    (new-app)
+          t      (term/string-terminal {:rows 10 :cols 30 :keys [{:key "a" :char "a"}]})
+          handle (app/run-blocking! app {:terminal t :max-fps 120})]
+      (assertions
+        "the terminal was left"
+        (:left? @(.-state t)) => true
+        "the render thread was stopped — NOT leaked alive after EOF"
+        (.isAlive ^Thread (:render-thread handle)) => false
+        "the ::render-loop runtime entry was cleared"
+        (render-loop-of app) => nil)))
+
+  (component "quit! is idempotent — a second quit! is a safe no-op"
+    (let [app    (new-app)
+          {:keys [terminal release left?]} (blocking-terminal 10 30)
+          handle (app/mount! app {:terminal terminal :max-fps 120})]
+      (Thread/sleep 30)
+      (app/quit! handle)
+      (deliver release nil)                                 ; let the input thread reach EOF + its finally
+      (app/quit! handle)                                    ; second call must not throw or re-break state
+      (Thread/sleep 20)
+      (assertions
+        "the render thread is gone and stays gone"
+        (.isAlive ^Thread (:render-thread handle)) => false
+        "::render-loop stays cleared"
+        (render-loop-of app) => nil
+        "the terminal stays left"
+        @left? => true)))
+
+  (component "after shutdown a late request-render! cannot write to the left/closed terminal (clears ::terminal)"
+    ;; shutdown! clears ::render-loop, so a later request-render! falls back to a SYNCHRONOUS render!.
+    ;; Unless ::terminal is also cleared, that render writes to the now-left terminal (a real JLine throws
+    ;; 'write after leave'). This fake throws on write once left, proving the post-shutdown no-op.
+    (let [release (promise)
+          left?   (atom false)
+          t       (reify term/Terminal
+                    (t-size [_] {:rows 5 :cols 10})
+                    (t-read-key [_] @release)
+                    (t-write! [_ _] (when @left? (throw (ex-info "write after leave" {}))))
+                    (t-flush! [_] nil)
+                    (t-set-cursor! [_ _ _ _] nil)
+                    (t-enter! [_] nil)
+                    (t-leave! [_] (reset! left? true) nil)
+                    (t-sync-supported? [_] false)
+                    (t-enhanced-keys? [_] false)
+                    (t-on-resize! [_ _] nil))
+          app     (new-app)
+          handle  (app/mount! app {:terminal t :max-fps 120})]
+      (app/quit! handle)                                    ; shutdown!: leaves terminal + clears ::terminal
+      (deliver release nil)                                 ; release the parked input loop
+      (assertions
+        "quit! cleared ::terminal from the runtime"
+        (app/terminal app) => nil
+        "a late request-render! is a clean no-op — it does NOT write to the left terminal, and does not throw"
+        (try (app/request-render! app) :ok (catch Throwable e [:threw (.getMessage e)])) => :ok)))
+
+  (component "shutdown! deregisters a crash-restore ::shutdown-hook if present (cooperates with terminal-restore)"
+    ;; The crash-restore feature stashes a JVM shutdown hook under ::shutdown-hook. The centralized
+    ;; shutdown! drops it on EVERY teardown (keyword + interop, no dependency on that feature) so repeated
+    ;; nonblocking mount!+quit! — even across fresh apps — never accumulate registered hooks.
+    ;; Use a blocking terminal so the input loop PARKS (no immediate EOF): only quit!'s shutdown! runs
+    ;; the teardown, so planting the hook then quit!ing is deterministic (no input-thread shutdown! racing
+    ;; the plant on a string-terminal's immediate EOF).
+    (let [app    (new-app)
+          {:keys [terminal release]} (blocking-terminal 5 10)
+          handle (app/mount! app {:terminal terminal :max-fps 120})
+          hook   (Thread. ^Runnable (fn [] nil) "fake-restore-hook")]
+      (.addShutdownHook (Runtime/getRuntime) hook)
+      (swap! (:com.fulcrologic.fulcro.application/runtime-atom app)
+        assoc :com.fulcrologic.fulcro.tui.application/shutdown-hook hook)
+      (app/quit! handle)
+      (deliver release nil)                                 ; let the parked input loop exit
+      (assertions
+        "quit!'s shutdown! cleared the ::shutdown-hook runtime entry"
+        (:com.fulcrologic.fulcro.tui.application/shutdown-hook
+          (deref (:com.fulcrologic.fulcro.application/runtime-atom app))) => nil
+        "and deregistered the hook from the JVM (removeShutdownHook => false: already removed)"
+        (.removeShutdownHook (Runtime/getRuntime) ^Thread hook) => false)))
+
   (component "a loop-level global keymap dispatches reserved chords (e.g. quit) regardless of focus"
     (let [app   (new-app)
           fired (atom false)
@@ -374,13 +585,13 @@
 
 (specification {:covers {`app/run-render-loop! "971aca,4498f1"}}
   "live render loop — repaints a state change made off the input thread (decoupled rendering)"
-  (let [app    (new-app)
-        ;; No scripted keys: the input loop reads nil and exits immediately, leaving ONLY the
-        ;; dedicated render loop running — exactly the thread we want to prove paints.
-        t      (term/string-terminal {:rows 10 :cols 30})
-        handle (app/mount! app {:terminal t :max-fps 120})]
-    ;; A state change NOT driven by a keystroke (stands in for a statechart/async update). It only
-    ;; flags dirty on THIS thread; the render loop must pick it up and repaint.
+  ;; A BLOCKING terminal parks the input loop in t-read-key, so the render loop stays alive because the
+  ;; SESSION is live — we no longer rely on the render loop surviving an immediate input EOF (it must not).
+  (let [app           (new-app)
+        {:keys [terminal release left?]} (blocking-terminal 10 30)
+        handle        (app/mount! app {:terminal terminal :max-fps 120})]
+    ;; A state change NOT driven by a keystroke (stands in for a statechart/async update). It only flags
+    ;; dirty on THIS thread; the render loop must pick it up and repaint.
     (comp/transact! app [(set-a {:v "ZZ"})])
     (let [painted? (loop [n 0]
                      (cond
@@ -389,10 +600,14 @@
                        (str/starts-with? (or (nth (app/screen-of app) 0 nil) "") "ZZ") true
                        (>= n 200) false
                        :else (do (Thread/sleep 10) (recur (inc n)))))]
-      (app/quit! handle)
+      ;; End the session by EOF-ing the read; the input-loop finally then runs the FULL teardown.
+      (deliver release nil)
+      (Thread/sleep 60)
       (assertions
         "the dedicated render loop repaints an off-input-thread state change without an explicit render!"
-        painted? => true))))
+        painted? => true
+        "EOF then tears down fully — the terminal is left AND the render thread is stopped, not leaked"
+        [@left? (.isAlive ^Thread (:render-thread handle))] => [true false]))))
 
 ;; ---------------------------------------------------------------------------
 ;; Overlay / picker: a root with a launch button and a state-gated picker.
@@ -558,6 +773,34 @@
             (get @(:com.fulcrologic.fulcro.application/runtime-atom app)
               :com.fulcrologic.fulcro.tui.application/force-redraw?) => false)))))
 
+  (component "a forced redraw whose write THROWS re-arms ::force-redraw? for the next frame (consumed edge is not lost)"
+    ;; render! consumes ::force-redraw? (swap-vals!) before the terminal write. If the write then throws,
+    ;; the next frame would diff against a baseline the screen never received unless the flag is re-armed.
+    (let [app   (new-app)
+          boom? (atom false)
+          t     (reify term/Terminal
+                  (t-size [_] {:rows 6 :cols 20})
+                  (t-read-key [_] nil)
+                  (t-write! [_ _] (when @boom? (throw (ex-info "write boom" {}))))
+                  (t-flush! [_] nil)
+                  (t-set-cursor! [_ _ _ _] nil)
+                  (t-enter! [_] nil)
+                  (t-leave! [_] nil)
+                  (t-sync-supported? [_] false)
+                  (t-enhanced-keys? [_] false)
+                  (t-on-resize! [_ _] nil))]
+      (app/attach! app t)                                   ; initial paint OK (boom? still false)
+      (reset! boom? true)
+      ;; Arm the flag directly (redraw! would synchronously render+consume it on the no-loop test path).
+      (swap! (:com.fulcrologic.fulcro.application/runtime-atom app)
+        assoc :com.fulcrologic.fulcro.tui.application/force-redraw? true)
+      (assertions
+        "render! propagates the terminal write failure"
+        (try (app/render! app) ::no-throw (catch Throwable _ ::threw)) => ::threw
+        "the consumed force-redraw? flag was re-armed for the next frame"
+        (get @(:com.fulcrologic.fulcro.application/runtime-atom app)
+          :com.fulcrologic.fulcro.tui.application/force-redraw?) => true)))
+
   (component "an exception while handling a keystroke is TOLERATED: recorded, passed to :on-error, loop keeps running (C2)"
     (let [app    (new-app)
           calls  (atom 0)
@@ -622,21 +865,38 @@
           "every request renders synchronously (no render loop present)"
           @calls => 5)))
 
-    (component "a render loop present defers painting to it (flags dirty, never paints on the caller)"
+    (component "a LIVE render loop present defers painting to it (flags dirty, never paints on the caller)"
       (let [app   (new-app)
             t     (term/string-terminal {:rows 10 :cols 30})
             _     (app/attach! app t)
             dirty (get @(get app runtime-key) dirty-key)
-            ;; A stand-in render-loop thread: request-render! only checks that a loop is present (via
-            ;; its :thread) to decide it must route to mark-dirty! rather than paint on the caller.
-            th    (Thread. ^Runnable (fn []))
+            ;; A stand-in render loop that is genuinely ALIVE and running: request-render! must route to
+            ;; mark-dirty! rather than paint on the caller.
+            th    (doto (Thread. ^Runnable (fn [] (try (Thread/sleep 5000) (catch Throwable _ nil))))
+                    (.setDaemon true) (.start))
             calls (atom 0)]
         (swap! (get app runtime-key) assoc render-loop-key {:thread th :running? (atom true)})
         (reset! dirty false)
         (with-redefs [app/render! (fn [a] (swap! calls inc) a)]
           (app/request-render! app))
+        (.interrupt th)
         (assertions
           "does NOT render on the calling thread"
           @calls => 0
           "flags the app dirty so the render loop repaints"
-          @dirty => true)))))
+          @dirty => true)))
+
+    (component "a STOPPED/dead render-loop entry renders synchronously (does not enqueue onto a dead loop)"
+      (let [app   (new-app)
+            t     (term/string-terminal {:rows 10 :cols 30})
+            _     (app/attach! app t)
+            ;; The entry lingers with :running? true, but the thread is NOT alive (never started) — models
+            ;; a loop that has exited while its runtime entry has not yet been cleared.
+            th    (Thread. ^Runnable (fn []))
+            calls (atom 0)]
+        (swap! (get app runtime-key) assoc render-loop-key {:thread th :running? (atom true)})
+        (with-redefs [app/render! (fn [a] (swap! calls inc) a)]
+          (app/request-render! app))
+        (assertions
+          "renders synchronously because the loop thread is not alive"
+          @calls => 1)))))

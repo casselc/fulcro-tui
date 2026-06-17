@@ -49,6 +49,7 @@
 (>def ::render-throttle-ms int?)
 (>def ::dirty? (? any?))                                    ; atom<boolean>: a repaint is pending (see `mark-dirty!`)
 (>def ::render-loop (? any?))                               ; the render-driver handle {:thread :running?} (live path)
+(>def ::shutdown-hook (? any?))                             ; JVM shutdown-hook Thread: restores the terminal on crash/kill
 (>def ::min-size (s/keys :req-un [::min-width ::min-height]))
 (>def ::min-width int?)
 (>def ::min-height int?)
@@ -319,15 +320,22 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
 `app`."
   [app]
   [any? => any?]
-  (let [rt       (runtime app)
-        terminal (::terminal rt)]
+  (let [rt0      (runtime app)
+        terminal (::terminal rt0)]
     (if (nil? terminal)
       app
       ;; Serialize renders: the render hook fires on the input thread (via transactions) while the
       ;; terminal's resize handler fires on JLine's signal thread — both call `render!`, and they must
       ;; not interleave their writes to the terminal or the cached prev-buffer/placed-tree.
       (p `render! (locking terminal
-                    (let [;; `engine/current-node-tree` computes the pure node tree from state (root class +
+                    (let [;; Re-read the runtime AFTER acquiring the lock: the diff baseline
+                          ;; (::prev-buffer/::last-size) and the force-redraw? flag must be read from the
+                          ;; SAME critical section that commits them. The earlier `rt0` deref (before the
+                          ;; lock, used only to find the terminal) could be stale — a concurrent frame that
+                          ;; won the lock first may already have committed a newer ::prev-buffer, and
+                          ;; diffing against the older one corrupts the incremental frame until a full repaint.
+                          rt             (runtime app)
+                          ;; `engine/current-node-tree` computes the pure node tree from state (root class +
                           ;; `db->tree` + `render-root`, with the focus var bound) AND memoizes it in the runtime
                           ;; atom keyed on state-map identity. Sharing it with `process-key!` means a keystroke
                           ;; that only moves focus does not build the whole tree twice (once to resolve the focus
@@ -371,7 +379,11 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
                           resized?       (boolean (and last-size (not= last-size size)))
                           ;; A `redraw!` request (e.g. Ctrl-L) forces a clear + full repaint to recover a screen
                           ;; corrupted by stray output (a rogue log line, another process writing to the tty…).
-                          force-redraw?  (boolean (::force-redraw? rt))
+                          ;; READ AND CLEAR it atomically: redraw! sets it from the input thread WITHOUT the
+                          ;; terminal lock, so a separate read-then-(end-of-frame)-clear could drop the edge —
+                          ;; swap-vals! consumes the flag in one CAS, so a forced clear is never lost.
+                          force-redraw?  (boolean (::force-redraw?
+                                                    (first (swap-vals! (runtime-atom-key app) assoc ::force-redraw? false))))
                           full-repaint?  (or resized? force-redraw?)
                           prev           (when-not full-repaint? (::prev-buffer rt))
                           ;; On a resize/forced redraw the whole screen is repainted from scratch (`:clear?`): a
@@ -380,21 +392,33 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
                           ansi           (p `serialize
                                            (engine/frame->ansi prev buf {:sync?  (term/t-sync-supported? terminal)
                                                                          :clear? full-repaint?}))]
-                      (p `write (term/t-write! terminal ansi))
-                      ;; Position the cursor AFTER the frame's drawing and flush once, so the cursor-move is
-                      ;; the last terminal command of the frame (otherwise the diff's writes leave the hardware
-                      ;; cursor wherever drawing ended, making the visible caret lag a frame on a real terminal).
-                      (p `cursor
-                        (when active-placed
-                          (position-cursor! app terminal active-placed))
-                        (when (and too-small? (nil? active-placed))
-                          (term/t-set-cursor! terminal 0 0 false)))
-                      (p `flush (term/t-flush! terminal))
+                      ;; The write/cursor/flush below can throw on a transient terminal failure. ::force-redraw?
+                      ;; was already consumed (swap-vals! above) and ::prev-buffer/::last-size are committed only
+                      ;; on success (below) — so a RESIZE re-arms itself (::last-size stays unchanged, keeping
+                      ;; resized? true next frame), but a consumed Ctrl-L forced redraw would be LOST. Re-arm it on
+                      ;; failure so the next frame still clears+repaints. Monotonic (only ever sets the flag true),
+                      ;; so a redraw! that arrived mid-frame is never clobbered.
+                      (try
+                        (p `write (term/t-write! terminal ansi))
+                        ;; Position the cursor AFTER the frame's drawing and flush once, so the cursor-move is
+                        ;; the last terminal command of the frame (otherwise the diff's writes leave the hardware
+                        ;; cursor wherever drawing ended, making the visible caret lag a frame on a real terminal).
+                        (p `cursor
+                          (when active-placed
+                            (position-cursor! app terminal active-placed))
+                          (when (and too-small? (nil? active-placed))
+                            (term/t-set-cursor! terminal 0 0 false)))
+                        (p `flush (term/t-flush! terminal))
+                        (catch Throwable t
+                          (when force-redraw?
+                            (swap! (runtime-atom-key app) assoc ::force-redraw? true))
+                          (throw t)))
+                      ;; ::force-redraw? was already read+cleared above (swap-vals!), so it is NOT re-set on the
+                      ;; success path here — re-clearing would clobber a redraw! that arrived during this frame.
                       (swap! (runtime-atom-key app) assoc
                         ::prev-buffer buf
                         ::placed active-placed
-                        ::last-size size
-                        ::force-redraw? false)
+                        ::last-size size)
                       app))))))
 
 (>defn request-render!
@@ -406,10 +430,17 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
 
    This is for repaint requests that originate on a SAFE thread (the input loop, a resize signal, an
    explicit `redraw!`). State-change-driven repaints go through `mark-dirty!` directly (from the
-   `:core-render!` hook) so they never render on the mutating thread even on the test path."
+   `:core-render!` hook) so they never render on the mutating thread even on the test path.
+
+   The loop is treated as present only when its runtime entry exists, its `:running?` flag is set, AND
+   its thread is still alive — so a stopped/cleared loop (after `shutdown!`) or a dead one falls back to
+   a synchronous render rather than marking dirty for a consumer that will never paint."
   [app]
   [any? => any?]
-  (if (some-> (runtime app) ::render-loop :thread)
+  (if (let [rl (::render-loop (runtime app))]
+        (and rl
+          (boolean (some-> (:running? rl) deref))
+          (boolean (some-> ^Thread (:thread rl) (.isAlive)))))
     (mark-dirty! app)
     (render! app)))
 
@@ -417,6 +448,12 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
   "How often the render loop checks the dirty flag while idle (ms). Small enough to be imperceptible as
    input→paint latency, large enough that an idle session costs ~nothing."
   8)
+
+(def ^:private render-loop-join-ms
+  "How long `stop-render-loop!` waits for the render thread to exit before giving up (ms). Bounded so
+   shutdown cannot hang forever on a wedged render/terminal write; see `stop-render-loop!` for the
+   trade-off this bound implies."
+  1000)
 
 (>defn- run-render-loop!
   "The live render driver: the SOLE thread that paints automatically. It polls the `::dirty?` flag and,
@@ -522,6 +559,10 @@ The placed tree from the previous frame is used to locate the enclosing viewport
 ;; Attach / mount / run / quit
 ;; ============================================================================
 
+;; `mount!`'s input-loop `finally` tears down via `shutdown!`, which is defined below (next to `quit!`,
+;; its other caller). Forward-declared so the `finally` can reference it.
+(declare shutdown!)
+
 (>defn- initial-node-tree
   "Returns the current pure TUI node tree for `app` (root class + `db->tree`), for computing the
 initial focus. Returns `nil` if the app has no state/root yet."
@@ -533,7 +574,14 @@ initial focus. Returns `nil` if the app has no state/root yet."
   "Attaches `terminal` to `app` and performs the initial paint. Stashes the terminal in the runtime
 atom, enters the terminal (`term/t-enter!`), registers a resize handler that repaints on a terminal
 size change (`t-on-resize!` → `render!`), sets initial focus to the first node in the current tree's
-`focus-order` when `::engine/focus` is unset, and renders once. Returns `app`. Starts no loop."
+`focus-order` when `::engine/focus` is unset, and renders once. Returns `app`. Starts no loop.
+
+This is the LOW-LEVEL, deterministic entry (used by `step!`, tests, and as the building block inside
+`mount!`). It deliberately does NOT install the JVM crash-restore shutdown hook: that is owned by
+`mount!`/`run-blocking!`, which drive real signal-handled sessions and tear it down on exit. Installing
+it here would register a JVM hook on every headless `attach!`/`step!` test. A caller building a custom
+loop directly on `attach!`+`step!` (rather than `mount!`) is responsible for its own terminal restore on
+abnormal exit (or should use `mount!`/`run-blocking!`, which handle it)."
   [app terminal]
   [any? any? => any?]
   (swap! (runtime-atom-key app) assoc ::terminal terminal)
@@ -553,6 +601,42 @@ size change (`t-on-resize!` → `render!`), sets initial focus to the first node
       (when-let [first-id (:id (first order))]
         (engine/focus! app first-id))))
   (render! app)
+  app)
+
+(declare remove-terminal-restore-hook!)
+
+(>defn- install-terminal-restore-hook!
+  "Registers a JVM shutdown hook that idempotently leaves `terminal` — restoring the alternate screen,
+auto-wrap, cursor visibility, and raw mode — if the process dies (a crash, an uncaught throw, or a
+SIGTERM/Ctrl-C kill) BEFORE the normal teardown runs. `t-leave!` is CAS-idempotent, so on a clean exit
+(where the input-loop `finally`/`quit!` already left the terminal) the hook is a harmless no-op. The hook
+Thread is stashed under `::shutdown-hook` so `run-blocking!` can deregister it after a clean session.
+
+DEREGISTERS any hook this app already has FIRST, so a host that `mount!`s the same app repeatedly (e.g.
+`mount!`+`quit!` in a loop, which does not itself remove the hook) replaces rather than accumulates
+registered hooks — only ever one is live per app. Best-effort: a platform without shutdown hooks (or a
+restrictive SecurityManager) simply skips it."
+  [app terminal]
+  [any? any? => any?]
+  (try
+    (remove-terminal-restore-hook! app)
+    (let [hook (Thread. ^Runnable (fn [] (try (term/t-leave! terminal) (catch Throwable _ nil)))
+                 "fulcro-tui-terminal-restore")]
+      (.addShutdownHook (Runtime/getRuntime) hook)
+      (swap! (runtime-atom-key app) assoc ::shutdown-hook hook))
+    (catch Throwable _ nil))
+  app)
+
+(>defn- remove-terminal-restore-hook!
+  "Deregisters the shutdown hook installed by `install-terminal-restore-hook!` after a CLEAN session, so a
+long-lived host that mounts/unmounts repeatedly does not accumulate hooks. No-op if there is none, it was
+already removed, or the JVM is already shutting down (`removeShutdownHook` throws then — caught). Returns
+`app`."
+  [app]
+  [any? => any?]
+  (when-let [hook (::shutdown-hook (runtime app))]
+    (try (.removeShutdownHook (Runtime/getRuntime) hook) (catch Throwable _ nil))
+    (swap! (runtime-atom-key app) dissoc ::shutdown-hook))
   app)
 
 (>defn mount!
@@ -579,10 +663,22 @@ size change (`t-on-resize!` → `render!`), sets initial focus to the first node
                      DISABLED and every render path is synchronous == `step!`. `run-blocking!`/
                      `start!` default this to 15.
 
-Returns a handle map `{:app :terminal :thread :running? :error}`. `:running?` is an atom that, when
-set false, stops the loop; `:error` is an atom holding any uncaught loop exception (else `nil`).
+Returns a handle map `{:app :terminal :thread :render-thread :running? :error}`. `:running?` is an atom
+that, when set false, stops the loop; `:error` is an atom holding any uncaught loop exception (else
+`nil`); `:render-thread` is the dedicated render thread (joined by `quit!` before the terminal is left).
 The loop reads keys with `term/t-read-key`; a `nil` (EOF) read or `:running?` becoming false
-terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
+terminates it; `term/t-leave!` is always called on exit (in a `finally`). A JVM shutdown hook is also
+installed so a crash / uncaught throw / SIGTERM before that teardown still restores the terminal;
+`run-blocking!` deregisters it after a clean session.
+
+Hook lifecycle caveat (this feature in isolation): the input-loop `finally`/`quit!` here only call
+`t-leave!`, so a bare `mount!`+`quit!` (no `run-blocking!`) leaves ITS hook registered until JVM exit —
+a harmless no-op (the terminal was already left), and `mount!`ing the SAME app again replaces rather
+than accumulates it (see `install-terminal-restore-hook!`). But a host that runs many bare
+`mount!`+`quit!` sessions on FRESH app instances would accumulate one registered (no-op) hook per app
+until JVM exit. The centralized teardown in `fix/dirty-terminal-on-exit` closes this: its `shutdown!`
+(run by both `quit!` and the `finally`) deregisters the hook on EVERY teardown, so accumulation cannot
+happen once these land together."
   ([app]
    [any? => ::handle]
    (mount! app {}))
@@ -598,7 +694,19 @@ terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
      ;; running, `request-render!`/`mark-dirty!` route ALL further paints onto it (never onto the input
      ;; loop, a transaction, or the statechart event-loop thread).
      (swap! (runtime-atom-key app) assoc ::render-throttle-ms throttle-ms)
-     (attach! app terminal)
+     ;; Restore the terminal even if the process DIES (crash / uncaught throw / SIGTERM) before the
+     ;; normal teardown runs. `run-blocking!` deregisters it after a clean session. Installed BEFORE
+     ;; `attach!`: `attach!` enters the alternate screen (`t-enter!`) and does the first paint, so a
+     ;; throw mid-`attach!` would otherwise strand the terminal in raw/alt-screen mode with no hook yet.
+     (install-terminal-restore-hook! app terminal)
+     (try
+       (attach! app terminal)
+       (catch Throwable t
+         ;; Initial enter/render failed: restore the terminal NOW (don't wait for the JVM hook) and drop
+         ;; the hook, then rethrow so the caller sees the failure with the terminal already clean.
+         (try (term/t-leave! terminal) (catch Throwable _ nil))
+         (remove-terminal-restore-hook! app)
+         (throw t)))
      (let [render-running? (atom true)
            render-thread   (Thread. ^Runnable (fn [] (try (run-render-loop! app render-running? throttle-ms)
                                                           (catch Throwable _ nil)))
@@ -646,9 +754,13 @@ terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
                          (reset! error t)
                          (when on-error (try (on-error app t) (catch Throwable _ nil))))
                        (finally
-                         (term/t-leave! terminal))))
+                         ;; FULL teardown on ANY input-loop exit (EOF, error, or running?→false), not just
+                         ;; t-leave!: stop+join+clear the render loop too, so it can't outlive the terminal
+                         ;; (paint a closed terminal / leak the daemon). Same helper `quit!` uses.
+                         (shutdown! app terminal))))
            thread  (Thread. ^Runnable loop-fn "fulcro-tui-input-loop")
-           handle  {:app app :terminal terminal :thread thread :running? running? :error error}]
+           handle  {:app app :terminal terminal :thread thread :running? running? :error error
+                    :render-thread (some-> (runtime app) ::render-loop :thread)}]
        (swap! (:com.fulcrologic.fulcro.application/runtime-atom app) assoc ::handle handle)
        (.start thread)
        handle))))
@@ -675,20 +787,77 @@ Without the property the `perf/profile` wrapper compiles away entirely (zero ove
      (let [opts (merge {:max-fps 30} opts)
            {:keys [^Thread thread] :as handle} (mount! app opts)]
        (.join thread)
+       ;; Clean session ended (the input-loop finally already left the terminal): drop the crash-restore
+       ;; hook so a host running many sessions in one JVM does not accumulate shutdown hooks.
+       (remove-terminal-restore-hook! app)
        handle))))
+
+(>defn- stop-render-loop!
+  "Signals the dedicated render thread to stop and BLOCKS (bounded — see below) until it has exited, so
+that no in-flight or queued frame can paint while/after the terminal is being restored. Just flagging
+`running?` (as the loop's exit condition) is not enough on its own: a paint already underway races the
+`t-leave!` restore and can land the last app frame on the now-restored primary screen — a 'dirty' exit.
+Joining waits for any in-flight paint to finish and the loop to exit first. No-op (returns `app`) when
+there is no render loop (e.g. the deterministic `attach!`/`step!` path).
+
+The join is bounded (`render-loop-join-ms`) so shutdown cannot hang FOREVER on a render/terminal write
+that is itself wedged. The trade-off: if a write blocks past that bound, `shutdown!` proceeds to restore
+the terminal anyway and the dirty-exit race re-opens for that (pathological) case — a stuck write would
+typically also wedge `t-leave!`, so there is no clean win available there; bounding at least guarantees
+shutdown returns."
+  [app]
+  [any? => any?]
+  (when-let [rl (some-> (runtime app) ::render-loop)]
+    (when-let [r (:running? rl)] (reset! r false))
+    (when-let [^Thread th (:thread rl)] (try (.join th render-loop-join-ms) (catch Throwable _ nil))))
+  app)
+
+(>defn- shutdown!
+  "Idempotent teardown of `app`'s live driver, safe from ANY exit path — `quit!` and the input loop's
+`finally` (EOF, error, or `running?`→false) BOTH call it, so the render loop never outlives the terminal.
+In order:
+
+  1. Stop+join the render loop and CLEAR its runtime entry (`stop-render-loop!` + dissoc `::render-loop`):
+     no in-flight or queued frame can paint during/after the restore, AND a later `request-render!` no
+     longer enqueues onto a dead thread — with no loop installed it falls back to a synchronous render
+     (like a freshly-`attach!`ed app), keeping the app reusable/re-attachable.
+  2. Drop the terminal's resize handler, so a stray SIGWINCH cannot repaint a closing terminal.
+  3. Leave the terminal (`t-leave!` is CAS-idempotent, so a second `shutdown!` is a safe no-op). For a
+     real JLine terminal this CLOSES it, forcing a thread parked in the blocking `t-read-key` to EOF.
+  4. CLEAR `::terminal` from the runtime. After step 3 the terminal is left/closed, but `render!` reads
+     it from the runtime and writes to it — so a late `request-render!` (which, with `::render-loop`
+     now cleared, falls back to a SYNCHRONOUS `render!`) would write to the closed terminal (a real
+     JLine throws 'write after leave'). Dropping `::terminal` makes that a clean no-op (`render!`
+     already no-ops when no terminal is attached); a fresh `attach!` re-establishes it.
+  5. DEREGISTER any JVM crash-restore shutdown hook (`::shutdown-hook`) and drop it. Cooperates with the
+     crash-restore feature (`install-terminal-restore-hook!`) when present, a no-op otherwise — keyword +
+     interop only, no code dependency on it. Doing it here, on the SHARED teardown that both `quit!` and
+     the input-loop `finally` run, means repeated nonblocking `mount!`+`quit!` cycles — even across fresh
+     app instances — never accumulate registered hooks.
+
+Does NOT touch the input loop's own `running?`/thread — that is the caller's concern. Returns `app`."
+  [app terminal]
+  [any? any? => any?]
+  (stop-render-loop! app)
+  (swap! (runtime-atom-key app) dissoc ::render-loop)
+  (when terminal
+    (try (term/t-on-resize! terminal nil) (catch Throwable _ nil))
+    (try (term/t-leave! terminal) (catch Throwable _ nil)))
+  (when-let [^Thread hook (::shutdown-hook (runtime app))]
+    (try (.removeShutdownHook (Runtime/getRuntime) hook) (catch Throwable _ nil)))
+  (swap! (runtime-atom-key app) dissoc ::terminal ::shutdown-hook)
+  app)
 
 (>defn quit!
   "Stops the input loop for a `mount!`/`run-blocking!` `handle` (or, given an `app`, looks up its
 handle/terminal). Returns `handle-or-app`. Steps, in order:
 
 1. Sets `:running?` false (so the loop won't process the next key).
-2. Unregisters the terminal's resize handler (`t-on-resize!` with `nil`) — otherwise a stray
-   SIGWINCH delivered after the terminal is closed would invoke `render!` against a closed
-   terminal (C1).
-3. Leaves the terminal (`t-leave!`). For a real JLine terminal this CLOSES the terminal, which
-   forces a thread parked in the blocking `t-read-key` to return EOF — this (not the interrupt)
-   is what actually unblocks and ends a programmatically-quit loop (C3).
-4. Best-effort `.interrupt` of the loop thread as a fallback.
+2. `shutdown!`s the driver: stops+joins+clears the render loop, drops the resize handler, and leaves
+   the terminal — the SAME teardown the input loop's `finally` runs, so an in-flight frame cannot paint
+   onto the restored screen (a 'dirty' exit) and the render thread is never leaked. Leaving the terminal
+   also CLOSES a real JLine terminal, forcing a thread parked in `t-read-key` to EOF (C3).
+3. Best-effort `.interrupt` of the loop thread as a fallback.
 
 Residual limitation: unblocking the blocked read depends on JLine closing the input on `.close`;
 if a transport does not, the loop ends on the next keypress/EOF instead."
@@ -699,18 +868,14 @@ if a transport does not, the loop ends on the next keypress/EOF instead."
                  :else (some-> (:com.fulcrologic.fulcro.application/runtime-atom handle-or-app)
                          deref ::handle))
         {:keys [^Thread thread running? terminal]} (or handle {:terminal (terminal handle-or-app)})
-        app    (or (:app handle) handle-or-app)
-        rl     (some-> (runtime app) ::render-loop)]
+        app    (or (:app handle) handle-or-app)]
     (when running? (reset! running? false))
-    ;; Stop the dedicated render loop too, so no frame paints after the terminal is left/closed (it
-    ;; notices the flag within `idle-poll-ms` and exits).
-    (when-let [r (:running? rl)] (reset! r false))
-    (when terminal
-      ;; C1: drop the resize handler BEFORE closing, so a concurrent SIGWINCH can't paint a
-      ;; closed terminal. Then C3: t-leave! closes it, forcing the blocked read to EOF.
-      (try (term/t-on-resize! terminal nil) (catch Throwable _ nil))
-      (try (term/t-leave! terminal) (catch Throwable _ nil)))
-    (when thread (.interrupt thread))
+    (shutdown! app terminal)
+    ;; Interrupt the loop thread as a fallback to unblock its read — UNLESS quit! is being called FROM
+    ;; that thread (the quit-chord handler runs on the input loop). A self-interrupt sets this thread's
+    ;; interrupt flag for no benefit (t-leave! already closed the terminal, unblocking the read) and
+    ;; could trip a later interruptible call (e.g. the join in shutdown!'s own finally pass).
+    (when (and thread (not (identical? thread (Thread/currentThread)))) (.interrupt thread))
     handle-or-app))
 
 (>defn redirect-logging-to-temp-file!

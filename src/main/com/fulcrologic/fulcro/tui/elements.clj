@@ -68,8 +68,11 @@ over calling this directly."
   (element :button args))
 
 (defn hbox
-  "Returns an `:hbox` node that stacks `children` horizontally. An optional leading attribute map
-   sets layout/style attributes for the container."
+  "Returns an `:hbox` node that stacks `children` horizontally (main axis = horizontal). An optional
+   leading attribute map sets layout/style attributes for the container, including `:justify` to
+   position the children along the main (horizontal) axis when they do not fill it: `:start` (default),
+   `:center`, `:end`, `:space-between`, `:space-around`, or `:space-evenly`. (To position a single child
+   on the cross (vertical) axis, set that child's own `:align`.)"
   [& args]
   (element :hbox args))
 
@@ -97,6 +100,10 @@ over calling this directly."
      * `:width`/`:height` - the window size in cells (a number, or a `[:fraction f]` of the screen);
                       defaults to the modal's intrinsic content size when omitted.
      * `:align`     - position on screen, one of `:center` (default), `:start`, `:end`.
+     * `:justify`   - distributes the modal's vertically-stacked children along the main (vertical)
+                      axis when they do not fill it: `:start` (default), `:center`, `:end`,
+                      `:space-between`, `:space-around`, `:space-evenly` (as on `vbox`/`hbox`). This is
+                      distinct from `:align`, which positions the whole window on screen.
      * `:border?`   - draw a border (default `true`).
      * `:title`     - a string painted onto the top border.
      * `:on-dismiss`- a zero-arg handler invoked when Escape is pressed while the modal is active.
@@ -114,8 +121,11 @@ over calling this directly."
   (element :text args))
 
 (defn vbox
-  "Returns a `:vbox` node that stacks `children` vertically. An optional leading attribute map sets
-   layout/style attributes for the container."
+  "Returns a `:vbox` node that stacks `children` vertically (main axis = vertical). An optional leading
+   attribute map sets layout/style attributes for the container, including `:justify` to position the
+   children along the main (vertical) axis when they do not fill it: `:start` (default), `:center`,
+   `:end`, `:space-between`, `:space-around`, or `:space-evenly`. (To position a single child on the
+   cross (horizontal) axis, set that child's own `:align`.)"
   [& args]
   (element :vbox args))
 

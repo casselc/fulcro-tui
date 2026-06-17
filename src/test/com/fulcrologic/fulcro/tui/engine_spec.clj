@@ -1,6 +1,9 @@
 (ns com.fulcrologic.fulcro.tui.engine-spec
   (:require
     [clojure.string :as str]
+    [clojure.test.check :as tc]
+    [clojure.test.check.generators :as gen]
+    [clojure.test.check.properties :as prop]
     [com.fulcrologic.fulcro.algorithms.tx-processing.synchronous-tx-processing :as stx]
     [com.fulcrologic.fulcro.components :as comp]
     [com.fulcrologic.fulcro.mutations :as m]
@@ -281,6 +284,52 @@
                               {:x 0 :y 0 :w 10 :h 2})))
       => [5 5]))
 
+  (component "grow distribution yields whole-cell sizes (no fractional coordinates)"
+    (assertions
+      ;; A SINGLE grow child already got an integer (it takes the leftover remainder); the bug only bit
+      ;; with TWO+ grow children, where the non-last ones go through (quot (* leftover w) total-w) — and
+      ;; quot of DOUBLES returns a double, leaking floats into the placed rects.
+      "two float-weighted :grow children split the leftover into integers, not doubles"
+      (let [ws (mapv :w (child-rects (engine/place
+                                       (elements/hbox {} (elements/box {:grow 1.0}) (elements/box {:grow 1.0}))
+                                       {:x 0 :y 0 :w 11 :h 1})))]
+        [ws (mapv integer? ws)])
+      => [[5 6] [true true]]
+      "unequal float weights still partition the whole extent as integers, remainder to the last"
+      (mapv :w (child-rects (engine/place
+                              (elements/hbox {} (elements/box {:grow 1.0}) (elements/box {:grow 2.0}))
+                              {:x 0 :y 0 :w 10 :h 1})))
+      => [3 7]
+      "placed x-coords stay integers with multiple float-weighted grow children"
+      (mapv :x (child-rects (engine/place
+                              (elements/hbox {} (elements/box {:grow 1.0}) (elements/text {} "x") (elements/box {:grow 1.0}))
+                              {:x 0 :y 0 :w 30 :h 1})))
+      => [0 14 15]
+      ;; Regression: before the fix, the double coordinates made put-cell's vector assoc throw
+      ;; \"IllegalArgumentException: Key must be integer\" during paint.
+      "a tree with multiple float-weighted :grow children renders without throwing"
+      (let [row (first (engine/screen (engine/render-buffer
+                                        (engine/place
+                                          (elements/hbox {} (elements/box {:grow 1.0}) (elements/text {} "x") (elements/box {:grow 1.0}))
+                                          {:x 0 :y 0 :w 30 :h 1})
+                                        1 30)))]
+        [(count row) (str/index-of row "x")])
+      => [30 14]
+      ;; Guard: an INVALID weight (0, negative, NaN, Infinity, or a non-number) is treated as no-grow —
+      ;; the child takes its fixed/intrinsic size and the slack goes to the other grow child — rather
+      ;; than crashing the (long (quot ...)) share math (NaN/Inf -> long throws; non-number -> ClassCast).
+      "invalid :grow weights are treated as no-grow (no crash); the valid grow child absorbs the slack"
+      (mapv (fn [g] (mapv :w (child-rects (engine/place
+                                            (elements/hbox {} (elements/box {:grow g}) (elements/box {:grow 1}))
+                                            {:x 0 :y 0 :w 10 :h 1}))))
+        [0 -1 ##NaN ##Inf "x" :kw])
+      => [[0 10] [0 10] [0 10] [0 10] [0 10] [0 10]]
+      "a finite positive (float or ratio) weight still grows normally"
+      (mapv :w (child-rects (engine/place
+                              (elements/hbox {} (elements/box {:grow 2.5}) (elements/box {:grow 1}))
+                              {:x 0 :y 0 :w 14 :h 1})))
+      => [10 4]))
+
   (component "cross-axis alignment"
     (assertions
       "centers a narrower child within the container width"
@@ -288,6 +337,80 @@
                               (engine/place (elements/vbox {} (elements/text {:width 4 :align :center} "x"))
                                 {:x 0 :y 0 :w 10 :h 1}))))
       => {:x 3 :y 0 :w 4 :h 1}))
+
+  (component "main-axis justify"
+    (let [xs (fn [w attrs]
+               ;; three 2-wide boxes (6 used) in a w-wide hbox => (w - 6) cells of slack to distribute
+               (mapv :x (child-rects
+                          (engine/place
+                            (elements/hbox attrs
+                              (elements/box {:width 2}) (elements/box {:width 2}) (elements/box {:width 2}))
+                            {:x 0 :y 0 :w w :h 1}))))
+          x1 (fn [attrs]
+               ;; a single 2-wide box in an 18-wide hbox => 16 cells of slack (exercises the n=1 paths)
+               (-> (engine/place (elements/hbox attrs (elements/box {:width 2})) {:x 0 :y 0 :w 18 :h 1})
+                 ::engine/children first ::engine/rect :x))]
+      (assertions
+        ;; w=18 => 12 cells of slack, evenly divisible by 2/3/4 (clean gaps, no rounding)
+        "defaults to :start — children packed at the near edge, leftover unused (unchanged behavior)"
+        (xs 18 {}) => [0 2 4]
+        "an explicit :start matches the default"
+        (xs 18 {:justify :start}) => [0 2 4]
+        ":center centers the packed block of children"
+        (xs 18 {:justify :center}) => [6 8 10]
+        ":end pushes the packed block to the far edge"
+        (xs 18 {:justify :end}) => [12 14 16]
+        ":space-between spreads the slack into the gaps between children, none at the ends"
+        (xs 18 {:justify :space-between}) => [0 8 16]
+        ":space-around surrounds each child with equal space (half-size at the ends)"
+        (xs 18 {:justify :space-around}) => [2 8 14]
+        ":space-evenly makes every gap, including the ends, equal"
+        (xs 18 {:justify :space-evenly}) => [3 8 13]
+
+        ;; w=17 => 11 cells of slack, NOT evenly divisible: every gap is a uniform quot, and the cells
+        ;; quot discards collect ENTIRELY as the trailing margin at the far end (NOT one-per-gap). That
+        ;; trailing remainder can be several cells, so the last child can fall well short of the far edge.
+        ":end always reaches the far edge even with an odd remainder (lead = whole slack)"
+        (xs 17 {:justify :end}) => [11 13 15]
+        ":space-between — gaps both 5 (equal); 1 leftover cell sits at the far end, so the last child stops at 14 (1 short of 15)"
+        (xs 17 {:justify :space-between}) => [0 7 14]
+        ":space-around — lead 1, gaps both 3; the 4-cell remainder is the trailing margin, last child at 11 (4 short of 15)"
+        (xs 17 {:justify :space-around}) => [1 6 11]
+        ":space-evenly — lead 2, gaps both 2; the 5-cell remainder is the trailing margin, last child at 10 (5 short of 15)"
+        (xs 17 {:justify :space-evenly}) => [2 6 10]
+
+        ;; single child (n=1): :space-between must fall back to :start (guards (dec n)=0 divide-by-zero)
+        ":center moves a lone child to the middle"
+        (x1 {:justify :center}) => 8
+        ":end moves a lone child to the far edge"
+        (x1 {:justify :end}) => 16
+        ":space-between falls back to :start for a lone child (no divide-by-zero on (dec n))"
+        (x1 {:justify :space-between}) => 0
+        ":space-around centers a lone child"
+        (x1 {:justify :space-around}) => 8
+        ":space-evenly centers a lone child"
+        (x1 {:justify :space-evenly}) => 8))
+    (assertions
+      "an empty justified container places no children (n=0 guard; no divide-by-zero in space-around)"
+      (child-rects (engine/place (elements/hbox {:justify :space-around}) {:x 0 :y 0 :w 18 :h 1})) => []
+      "is inert when a :grow child already absorbs the leftover space"
+      (child-rects (engine/place
+                     (elements/hbox {:justify :center}
+                       (elements/box {:width 2}) (elements/box {:grow 1}) (elements/box {:width 2}))
+                     {:x 0 :y 0 :w 18 :h 1}))
+      => [{:x 0 :y 0 :w 2 :h 1} {:x 2 :y 0 :w 14 :h 1} {:x 16 :y 0 :w 2 :h 1}]
+      "applies on the main (vertical) axis of a vbox too"
+      (mapv :y (child-rects (engine/place
+                              (elements/vbox {:justify :end}
+                                (elements/box {:height 2}) (elements/box {:height 2}))
+                              {:x 0 :y 0 :w 4 :h 12})))
+      => [8 10]
+      "applies to a :modal's vertically-stacked children too"
+      (mapv :y (child-rects (engine/place
+                              (elements/modal {:border? false :justify :end}
+                                (elements/box {:height 2}) (elements/box {:height 2}))
+                              {:x 0 :y 0 :w 10 :h 12})))
+      => [8 10]))
 
   (component "insets"
     (assertions
@@ -1657,6 +1780,135 @@
         => [{:x 0 :y 0 :w 3 :h 1} {:x 0 :y 1 :w 3 :h 1}]
         "and the container paints both children"
         (engine/screen (engine/render-buffer placed 2 3)) => ["###" "###"]))))
+
+;; ---------------------------------------------------------------------------
+;; Generative (property-based) layout invariants.
+;; test.check fuzzes random VALID layout trees (mixes of fixed/:half/:fraction/:grow children on either
+;; axis) and viewports, asserting the engine's core contract: every placed rect is a non-negative INTEGER
+;; rectangle, and painting never throws. This is the cheap, high-value generative coverage — layout is
+;; pure, test.check ships in both the JVM and bb test runtimes, so it runs on both. (We do NOT fuzz
+;; concurrency: the render/input loops have no deterministic scheduler seam, so interleaving generation
+;; would be flaky for ~no signal — see the dirty-exit thread-join test for that bound instead.)
+;; ---------------------------------------------------------------------------
+
+(defn- all-rects
+  "Every `::engine/rect` in a placed tree: the node's own rect plus those of every placed node descendant."
+  [placed]
+  (cons (::engine/rect placed)
+    (mapcat all-rects (filter engine/node? (::engine/children placed)))))
+
+(def ^:private main-size-gen
+  ;; a valid main-axis size spec: fixed cells, :half, a [:fraction f] in 0..1, or nil (intrinsic)
+  (gen/frequency [[4 (gen/choose 1 10)]
+                  [1 (gen/return :half)]
+                  [2 (gen/fmap (fn [n] [:fraction (/ (double n) 12)]) (gen/choose 0 12))]
+                  [2 (gen/return nil)]]))
+
+(def ^:private valid-grow-gen (gen/elements [1 2 3 1.0 2.5 1/2]))
+
+(def ^:private box-gen
+  (gen/bind gen/boolean
+    (fn [grow?]
+      (if grow?
+        (gen/fmap (fn [g] (elements/box {:grow g})) valid-grow-gen)
+        (gen/fmap (fn [s] (elements/box {:width s :height s})) main-size-gen)))))
+
+(def ^:private tree-gen
+  (gen/bind (gen/elements [:h :v])
+    (fn [axis]
+      (gen/fmap (fn [kids] (apply (if (= axis :h) elements/hbox elements/vbox) {} kids))
+        (gen/vector box-gen 0 6)))))
+
+(def ^:private viewport-gen
+  (gen/fmap (fn [[w h]] {:x 0 :y 0 :w w :h h})
+    (gen/tuple (gen/choose 0 40) (gen/choose 0 20))))
+
+(defn- container-children-sane?
+  "For a placed `:hbox`/`:vbox` (no insets in these generators), its direct children are NON-OVERLAPPING
+   and in order along the MAIN axis, and fully CONTAINED on the CROSS axis (place-stack mins cross-size to
+   the track). Both hold for ANY valid layout, even when the main axis overflows the track."
+  [placed]
+  (let [{:keys [x y w h]} (::engine/rect placed)
+        hbox? (= :hbox (::engine/tag placed))
+        kids  (mapv ::engine/rect (filter engine/node? (::engine/children placed)))]
+    (and
+      ;; cross-axis containment (vertical for an hbox, horizontal for a vbox)
+      (every? (fn [r] (if hbox?
+                        (and (>= (:y r) y) (<= (+ (:y r) (:h r)) (+ y h)))
+                        (and (>= (:x r) x) (<= (+ (:x r) (:w r)) (+ x w)))))
+        kids)
+      ;; main-axis: each child's far edge is at-or-before the next child's near edge (ordered, no
+      ;; overlap; any :justify gap is >= 0)
+      (every? (fn [[a b]] (if hbox? (<= (+ (:x a) (:w a)) (:x b)) (<= (+ (:y a) (:h a)) (:y b))))
+        (partition 2 1 kids)))))
+
+(def ^:private clean-coords-prop
+  (prop/for-all [tree tree-gen rect viewport-gen]
+    (let [placed (engine/place tree rect)]
+      (and (every? (fn [r] (and (nat-int? (:x r)) (nat-int? (:y r))
+                                (nat-int? (:w r)) (nat-int? (:h r))))
+             (all-rects placed))
+           ;; children ordered/non-overlapping on the main axis, contained on the cross axis
+           (container-children-sane? placed)
+           ;; painting any generated tree must not throw (a fractional/negative coord would)
+           (do (engine/render-buffer placed (max 1 (:h rect)) (max 1 (:w rect))) true)))))
+
+(def ^:private fitting-box-gen
+  ;; Children that PROVABLY fit a large-enough track: a small fixed size, or a grow weight (which only
+  ;; ever consumes leftover). No :half/:fraction here — several of those can sum past the track.
+  (gen/bind gen/boolean
+    (fn [grow?]
+      (if grow?
+        (gen/fmap (fn [g] (elements/box {:grow g})) (gen/elements [1 2 1.0]))
+        (gen/fmap (fn [s] (elements/box {:width s :height s})) (gen/choose 1 5))))))
+
+(def ^:private fitting-containment-prop
+  ;; A track >= 30 holds <=6 fixed children (<=5 each => <=30); grow children fill leftover; the cross
+  ;; track (8) holds every <=5 cross size. So every child is FULLY contained on BOTH axes.
+  (prop/for-all [axis (gen/elements [:h :v])
+                 kids (gen/vector fitting-box-gen 0 6)
+                 ext  (gen/choose 30 48)]
+    (let [tree   (apply (if (= axis :h) elements/hbox elements/vbox) {} kids)
+          rect   (if (= axis :h) {:x 0 :y 0 :w ext :h 8} {:x 0 :y 0 :w 8 :h ext})
+          placed (engine/place tree rect)
+          {:keys [x y w h]} (::engine/rect placed)]
+      (every? (fn [r] (and (>= (:x r) x) (>= (:y r) y)
+                           (<= (+ (:x r) (:w r)) (+ x w))
+                           (<= (+ (:y r) (:h r)) (+ y h))))
+        (mapv ::engine/rect (filter engine/node? (::engine/children placed)))))))
+
+(def ^:private clamp-scroll-prop
+  (prop/for-all [sx (gen/choose -20 60) sy (gen/choose -20 60)
+                 vw (gen/choose 0 50)   vh (gen/choose 0 50)
+                 ww (gen/choose 0 50)   wh (gen/choose 0 50)]
+    (let [virtual {:w vw :h vh} view {:w ww :h wh}
+          {:keys [x y]} (engine/clamp-scroll {:x sx :y sy} virtual view)]
+      (and (<= 0 x (max 0 (- vw ww)))
+           (<= 0 y (max 0 (- vh wh)))
+           ;; idempotent: clamping an already-clamped offset is a no-op
+           (= {:x x :y y} (engine/clamp-scroll {:x x :y y} virtual view))))))
+
+(def ^:private scroll-to-show-prop
+  ;; rw/rh <= 6 <= vw/vh, so the target FITS the view on both axes — scroll-to-show must then make each
+  ;; axis FULLY visible: result <= near AND far <= result + view.
+  (prop/for-all [sx (gen/choose 0 40) sy (gen/choose 0 40)
+                 rx (gen/choose 0 40) ry (gen/choose 0 40)
+                 rw (gen/choose 0 6)  rh (gen/choose 0 6)
+                 vw (gen/choose 6 20) vh (gen/choose 6 20)]
+    (let [{:keys [x y]} (engine/scroll-to-show {:x sx :y sy} {:x rx :y ry :w rw :h rh} {:w vw :h vh})]
+      (and (<= x rx) (<= (+ rx rw) (+ x vw))
+           (<= y ry) (<= (+ ry rh) (+ y vh))))))
+
+(specification "place — generative layout invariants (property-based)"
+  (assertions
+    "random valid trees + viewports: rects are non-negative integer boxes; children are ordered & non-overlapping on the main axis and contained on the cross axis; paint never throws"
+    (true? (:result (tc/quick-check 150 clean-coords-prop))) => true
+    "fitting layouts: every child is fully contained within the parent content rect on both axes"
+    (true? (:result (tc/quick-check 150 fitting-containment-prop))) => true
+    "clamp-scroll keeps the offset within [0, max(0, virtual-view)] on each axis and is idempotent"
+    (true? (:result (tc/quick-check 200 clamp-scroll-prop))) => true
+    "scroll-to-show makes a view-fitting target fully visible on each axis"
+    (true? (:result (tc/quick-check 200 scroll-to-show-prop))) => true))
 
 ;; NOTE: element-generator specs (`elements/element`, `elements/focused?`, `elements/picker`)
 ;; live in `com.fulcrologic.fulcro.tui.elements-spec`.
