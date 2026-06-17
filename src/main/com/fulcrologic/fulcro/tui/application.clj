@@ -319,15 +319,22 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
 `app`."
   [app]
   [any? => any?]
-  (let [rt       (runtime app)
-        terminal (::terminal rt)]
+  (let [rt0      (runtime app)
+        terminal (::terminal rt0)]
     (if (nil? terminal)
       app
       ;; Serialize renders: the render hook fires on the input thread (via transactions) while the
       ;; terminal's resize handler fires on JLine's signal thread — both call `render!`, and they must
       ;; not interleave their writes to the terminal or the cached prev-buffer/placed-tree.
       (p `render! (locking terminal
-                    (let [;; `engine/current-node-tree` computes the pure node tree from state (root class +
+                    (let [;; Re-read the runtime AFTER acquiring the lock: the diff baseline
+                          ;; (::prev-buffer/::last-size) and the force-redraw? flag must be read from the
+                          ;; SAME critical section that commits them. The earlier `rt0` deref (before the
+                          ;; lock, used only to find the terminal) could be stale — a concurrent frame that
+                          ;; won the lock first may already have committed a newer ::prev-buffer, and
+                          ;; diffing against the older one corrupts the incremental frame until a full repaint.
+                          rt             (runtime app)
+                          ;; `engine/current-node-tree` computes the pure node tree from state (root class +
                           ;; `db->tree` + `render-root`, with the focus var bound) AND memoizes it in the runtime
                           ;; atom keyed on state-map identity. Sharing it with `process-key!` means a keystroke
                           ;; that only moves focus does not build the whole tree twice (once to resolve the focus
@@ -371,7 +378,11 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
                           resized?       (boolean (and last-size (not= last-size size)))
                           ;; A `redraw!` request (e.g. Ctrl-L) forces a clear + full repaint to recover a screen
                           ;; corrupted by stray output (a rogue log line, another process writing to the tty…).
-                          force-redraw?  (boolean (::force-redraw? rt))
+                          ;; READ AND CLEAR it atomically: redraw! sets it from the input thread WITHOUT the
+                          ;; terminal lock, so a separate read-then-(end-of-frame)-clear could drop the edge —
+                          ;; swap-vals! consumes the flag in one CAS, so a forced clear is never lost.
+                          force-redraw?  (boolean (::force-redraw?
+                                                    (first (swap-vals! (runtime-atom-key app) assoc ::force-redraw? false))))
                           full-repaint?  (or resized? force-redraw?)
                           prev           (when-not full-repaint? (::prev-buffer rt))
                           ;; On a resize/forced redraw the whole screen is repainted from scratch (`:clear?`): a
@@ -380,21 +391,33 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
                           ansi           (p `serialize
                                            (engine/frame->ansi prev buf {:sync?  (term/t-sync-supported? terminal)
                                                                          :clear? full-repaint?}))]
-                      (p `write (term/t-write! terminal ansi))
-                      ;; Position the cursor AFTER the frame's drawing and flush once, so the cursor-move is
-                      ;; the last terminal command of the frame (otherwise the diff's writes leave the hardware
-                      ;; cursor wherever drawing ended, making the visible caret lag a frame on a real terminal).
-                      (p `cursor
-                        (when active-placed
-                          (position-cursor! app terminal active-placed))
-                        (when (and too-small? (nil? active-placed))
-                          (term/t-set-cursor! terminal 0 0 false)))
-                      (p `flush (term/t-flush! terminal))
+                      ;; The write/cursor/flush below can throw on a transient terminal failure. ::force-redraw?
+                      ;; was already consumed (swap-vals! above) and ::prev-buffer/::last-size are committed only
+                      ;; on success (below) — so a RESIZE re-arms itself (::last-size stays unchanged, keeping
+                      ;; resized? true next frame), but a consumed Ctrl-L forced redraw would be LOST. Re-arm it on
+                      ;; failure so the next frame still clears+repaints. Monotonic (only ever sets the flag true),
+                      ;; so a redraw! that arrived mid-frame is never clobbered.
+                      (try
+                        (p `write (term/t-write! terminal ansi))
+                        ;; Position the cursor AFTER the frame's drawing and flush once, so the cursor-move is
+                        ;; the last terminal command of the frame (otherwise the diff's writes leave the hardware
+                        ;; cursor wherever drawing ended, making the visible caret lag a frame on a real terminal).
+                        (p `cursor
+                          (when active-placed
+                            (position-cursor! app terminal active-placed))
+                          (when (and too-small? (nil? active-placed))
+                            (term/t-set-cursor! terminal 0 0 false)))
+                        (p `flush (term/t-flush! terminal))
+                        (catch Throwable t
+                          (when force-redraw?
+                            (swap! (runtime-atom-key app) assoc ::force-redraw? true))
+                          (throw t)))
+                      ;; ::force-redraw? was already read+cleared above (swap-vals!), so it is NOT re-set on the
+                      ;; success path here — re-clearing would clobber a redraw! that arrived during this frame.
                       (swap! (runtime-atom-key app) assoc
                         ::prev-buffer buf
                         ::placed active-placed
-                        ::last-size size
-                        ::force-redraw? false)
+                        ::last-size size)
                       app))))))
 
 (>defn request-render!

@@ -558,6 +558,34 @@
             (get @(:com.fulcrologic.fulcro.application/runtime-atom app)
               :com.fulcrologic.fulcro.tui.application/force-redraw?) => false)))))
 
+  (component "a forced redraw whose write THROWS re-arms ::force-redraw? for the next frame (consumed edge is not lost)"
+    ;; render! consumes ::force-redraw? (swap-vals!) before the terminal write. If the write then throws,
+    ;; the next frame would diff against a baseline the screen never received unless the flag is re-armed.
+    (let [app   (new-app)
+          boom? (atom false)
+          t     (reify term/Terminal
+                  (t-size [_] {:rows 6 :cols 20})
+                  (t-read-key [_] nil)
+                  (t-write! [_ _] (when @boom? (throw (ex-info "write boom" {}))))
+                  (t-flush! [_] nil)
+                  (t-set-cursor! [_ _ _ _] nil)
+                  (t-enter! [_] nil)
+                  (t-leave! [_] nil)
+                  (t-sync-supported? [_] false)
+                  (t-enhanced-keys? [_] false)
+                  (t-on-resize! [_ _] nil))]
+      (app/attach! app t)                                   ; initial paint OK (boom? still false)
+      (reset! boom? true)
+      ;; Arm the flag directly (redraw! would synchronously render+consume it on the no-loop test path).
+      (swap! (:com.fulcrologic.fulcro.application/runtime-atom app)
+        assoc :com.fulcrologic.fulcro.tui.application/force-redraw? true)
+      (assertions
+        "render! propagates the terminal write failure"
+        (try (app/render! app) ::no-throw (catch Throwable _ ::threw)) => ::threw
+        "the consumed force-redraw? flag was re-armed for the next frame"
+        (get @(:com.fulcrologic.fulcro.application/runtime-atom app)
+          :com.fulcrologic.fulcro.tui.application/force-redraw?) => true)))
+
   (component "an exception while handling a keystroke is TOLERATED: recorded, passed to :on-error, loop keeps running (C2)"
     (let [app    (new-app)
           calls  (atom 0)
