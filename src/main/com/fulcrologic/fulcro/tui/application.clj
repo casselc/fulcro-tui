@@ -579,8 +579,9 @@ size change (`t-on-resize!` → `render!`), sets initial focus to the first node
                      DISABLED and every render path is synchronous == `step!`. `run-blocking!`/
                      `start!` default this to 15.
 
-Returns a handle map `{:app :terminal :thread :running? :error}`. `:running?` is an atom that, when
-set false, stops the loop; `:error` is an atom holding any uncaught loop exception (else `nil`).
+Returns a handle map `{:app :terminal :thread :render-thread :running? :error}`. `:running?` is an atom
+that, when set false, stops the loop; `:error` is an atom holding any uncaught loop exception (else
+`nil`); `:render-thread` is the dedicated render thread (joined by `quit!` before the terminal is left).
 The loop reads keys with `term/t-read-key`; a `nil` (EOF) read or `:running?` becoming false
 terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
   ([app]
@@ -648,7 +649,8 @@ terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
                        (finally
                          (term/t-leave! terminal))))
            thread  (Thread. ^Runnable loop-fn "fulcro-tui-input-loop")
-           handle  {:app app :terminal terminal :thread thread :running? running? :error error}]
+           handle  {:app app :terminal terminal :thread thread :running? running? :error error
+                    :render-thread (some-> (runtime app) ::render-loop :thread)}]
        (swap! (:com.fulcrologic.fulcro.application/runtime-atom app) assoc ::handle handle)
        (.start thread)
        handle))))
@@ -677,18 +679,35 @@ Without the property the `perf/profile` wrapper compiles away entirely (zero ove
        (.join thread)
        handle))))
 
+(>defn- stop-render-loop!
+  "Signals the dedicated render thread to stop and BLOCKS (bounded) until it has actually exited, so
+that no in-flight or queued frame can paint while/after the terminal is being restored. Just flagging
+`running?` (as the loop's exit condition) is not enough on its own: a paint already underway races the
+`t-leave!` restore and can land the last app frame on the now-restored primary screen — a 'dirty' exit.
+Joining waits for any in-flight paint to finish and the loop to exit first. No-op (returns `app`) when
+there is no render loop (e.g. the deterministic `attach!`/`step!` path)."
+  [app]
+  [any? => any?]
+  (when-let [rl (some-> (runtime app) ::render-loop)]
+    (when-let [r (:running? rl)] (reset! r false))
+    (when-let [^Thread th (:thread rl)] (try (.join th 1000) (catch Throwable _ nil))))
+  app)
+
 (>defn quit!
   "Stops the input loop for a `mount!`/`run-blocking!` `handle` (or, given an `app`, looks up its
 handle/terminal). Returns `handle-or-app`. Steps, in order:
 
 1. Sets `:running?` false (so the loop won't process the next key).
-2. Unregisters the terminal's resize handler (`t-on-resize!` with `nil`) — otherwise a stray
+2. Stops the dedicated render loop AND joins its thread (`stop-render-loop!`), so no in-flight or
+   queued frame paints during/after the terminal restore (which would leave the last app frame on
+   screen — a 'dirty' exit).
+3. Unregisters the terminal's resize handler (`t-on-resize!` with `nil`) — otherwise a stray
    SIGWINCH delivered after the terminal is closed would invoke `render!` against a closed
    terminal (C1).
-3. Leaves the terminal (`t-leave!`). For a real JLine terminal this CLOSES the terminal, which
+4. Leaves the terminal (`t-leave!`). For a real JLine terminal this CLOSES the terminal, which
    forces a thread parked in the blocking `t-read-key` to return EOF — this (not the interrupt)
    is what actually unblocks and ends a programmatically-quit loop (C3).
-4. Best-effort `.interrupt` of the loop thread as a fallback.
+5. Best-effort `.interrupt` of the loop thread as a fallback.
 
 Residual limitation: unblocking the blocked read depends on JLine closing the input on `.close`;
 if a transport does not, the loop ends on the next keypress/EOF instead."
@@ -699,12 +718,11 @@ if a transport does not, the loop ends on the next keypress/EOF instead."
                  :else (some-> (:com.fulcrologic.fulcro.application/runtime-atom handle-or-app)
                          deref ::handle))
         {:keys [^Thread thread running? terminal]} (or handle {:terminal (terminal handle-or-app)})
-        app    (or (:app handle) handle-or-app)
-        rl     (some-> (runtime app) ::render-loop)]
+        app    (or (:app handle) handle-or-app)]
     (when running? (reset! running? false))
-    ;; Stop the dedicated render loop too, so no frame paints after the terminal is left/closed (it
-    ;; notices the flag within `idle-poll-ms` and exits).
-    (when-let [r (:running? rl)] (reset! r false))
+    ;; Stop the dedicated render loop AND wait for it to actually exit BEFORE leaving the terminal, so
+    ;; neither an in-flight frame nor a queued repaint can paint onto the screen we are about to restore.
+    (stop-render-loop! app)
     (when terminal
       ;; C1: drop the resize handler BEFORE closing, so a concurrent SIGWINCH can't paint a
       ;; closed terminal. Then C3: t-leave! closes it, forcing the blocked read to EOF.
