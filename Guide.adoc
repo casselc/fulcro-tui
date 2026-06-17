@@ -311,14 +311,25 @@ On the *cross axis*, a child fills the track by default; if it declares a cross-
 size, `:align` (`:start` / `:center` / `:end`, with `:middle`/`:right`/`:bottom`
 aliases) positions it within the track.
 
+On the *main axis*, when the children do not fill it (i.e. no `:grow` child absorbs the
+slack), the container's `:justify` attribute positions them: `:start` (default — packed at
+the near edge), `:center`, `:end`, `:space-between` (slack split into the gaps between
+children, none at the ends), `:space-around` (equal space surrounding each child, half-size
+at the ends), or `:space-evenly` (every gap, including the ends, equal). In short — `:align`
+is per-child *cross-axis* placement; `:justify` is the container's *main-axis* distribution.
+
 [source,clojure]
 -----
 (elements/hbox {:height 1}
   (elements/text {:width 8 :color :cyan} "Name:")   ; <1>
   (elements/input {:id :name :grow 1 :value v}))     ; <2>
+
+(elements/hbox {:grow 1 :justify :end}              ; <3>
+  (elements/button {:id :quit} "Quit"))
 -----
 <1> A fixed 8-column label.
 <2> The input grows to fill the rest of the row.
+<3> The row grows to fill its width; `:justify :end` pushes the (intrinsically-sized) button to the right edge.
 
 == Borders and padding
 
@@ -565,7 +576,10 @@ Modal attributes:
   when falsy it renders nothing.
 * `:width` / `:height` — a cell count or `[:fraction f]` of the screen; defaults to
   the modal's intrinsic content size.
-* `:align` — `:center` (default), `:start`, or `:end`.
+* `:align` — `:center` (default), `:start`, or `:end`. Positions the whole window *on screen*.
+* `:justify` — distributes the modal's vertically-stacked *children* along the vertical (main)
+  axis when they do not fill it: `:start` (default), `:center`, `:end`, `:space-between`,
+  `:space-around`, `:space-evenly` (same as on `vbox`/`hbox`). Distinct from `:align` above.
 * `:border?` — defaults to `true`. `:title` paints a string on the top border.
 * `:on-dismiss` — a zero-arg handler fired on *Escape*.
 
@@ -1118,7 +1132,8 @@ NOTE: The painter toolkit a `paint` method may use is all public in `engine`: `p
 
 A container needs BOTH a `place` (lay children out) and a `paint` (recurse into the placed children).
 Rather than reimplement distribution, reuse `engine/place-stack` — the same `:vbox`/`:hbox` engine
-that honors `:width`/`:height`/`:half`/`:fraction`/`:grow`/`:align`:
+that honors `:width`/`:height`/`:half`/`:fraction`/`:grow`/`:align` (and, via its 4-arity, the
+container's main-axis `:justify`):
 
 [source,clojure]
 -----
@@ -1128,7 +1143,8 @@ that honors `:width`/`:height`/`:half`/`:fraction`/`:grow`/`:align`:
                  :w (max 0 (- (:w rect) l r)) :h (max 0 (- (:h rect) t b))}]
     (assoc node ::engine/rect rect
       ::engine/children (engine/place-stack :v content
-                          (mapv engine/as-node (::engine/children node))))))
+                          (mapv engine/as-node (::engine/children node))
+                          (:justify (::engine/attrs node))))))   ; honor container :justify
 
 (defmethod engine/paint :my/grid [buf node clip]
   (let [node-clip (engine/rect-intersection clip (::engine/rect node))]

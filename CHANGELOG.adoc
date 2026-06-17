@@ -8,6 +8,7 @@ Included capabilities:
 
 * Element generators (`vbox`, `hbox`, `box`, `text`, `input`, `button`, `line`, `viewport`) and the node model.
 * Layout (intrinsic sizing, placement, clamping/scrolling helpers).
+* Main-axis justification: `vbox`/`hbox` accept a `:justify` attribute (`:start` (default), `:center`, `:end`, `:space-between`, `:space-around`, `:space-evenly`) that positions children along the main axis when they don't fill it — the container-level counterpart to per-child cross-axis `:align`. `place-stack` gains a 4-arity carrying it.
 * Buffer rendering and diffing (cell/char buffers, SGR styling, ANSI emission, frame diff -> ops -> ANSI).
 * Component walker for standard Fulcro `defsc` components whose render returns terminal nodes (factory, computed-factory, render-instance/tree/root).
 * Focus management, text input editing, and key routing.
