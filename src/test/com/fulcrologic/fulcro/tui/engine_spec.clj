@@ -1,6 +1,9 @@
 (ns com.fulcrologic.fulcro.tui.engine-spec
   (:require
     [clojure.string :as str]
+    [clojure.test.check :as tc]
+    [clojure.test.check.generators :as gen]
+    [clojure.test.check.properties :as prop]
     [com.fulcrologic.fulcro.algorithms.tx-processing.synchronous-tx-processing :as stx]
     [com.fulcrologic.fulcro.components :as comp]
     [com.fulcrologic.fulcro.mutations :as m]
@@ -311,7 +314,21 @@
                                           {:x 0 :y 0 :w 30 :h 1})
                                         1 30)))]
         [(count row) (str/index-of row "x")])
-      => [30 14]))
+      => [30 14]
+      ;; Guard: an INVALID weight (0, negative, NaN, Infinity, or a non-number) is treated as no-grow —
+      ;; the child takes its fixed/intrinsic size and the slack goes to the other grow child — rather
+      ;; than crashing the (long (quot ...)) share math (NaN/Inf -> long throws; non-number -> ClassCast).
+      "invalid :grow weights are treated as no-grow (no crash); the valid grow child absorbs the slack"
+      (mapv (fn [g] (mapv :w (child-rects (engine/place
+                                            (elements/hbox {} (elements/box {:grow g}) (elements/box {:grow 1}))
+                                            {:x 0 :y 0 :w 10 :h 1}))))
+        [0 -1 ##NaN ##Inf "x" :kw])
+      => [[0 10] [0 10] [0 10] [0 10] [0 10] [0 10]]
+      "a finite positive (float or ratio) weight still grows normally"
+      (mapv :w (child-rects (engine/place
+                              (elements/hbox {} (elements/box {:grow 2.5}) (elements/box {:grow 1}))
+                              {:x 0 :y 0 :w 14 :h 1})))
+      => [10 4]))
 
   (component "cross-axis alignment"
     (assertions
@@ -1689,6 +1706,62 @@
         => [{:x 0 :y 0 :w 3 :h 1} {:x 0 :y 1 :w 3 :h 1}]
         "and the container paints both children"
         (engine/screen (engine/render-buffer placed 2 3)) => ["###" "###"]))))
+
+;; ---------------------------------------------------------------------------
+;; Generative (property-based) layout invariants.
+;; test.check fuzzes random VALID layout trees (mixes of fixed/:half/:fraction/:grow children on either
+;; axis) and viewports, asserting the engine's core contract: every placed rect is a non-negative INTEGER
+;; rectangle, and painting never throws. This is the cheap, high-value generative coverage — layout is
+;; pure, test.check ships in both the JVM and bb test runtimes, so it runs on both. (We do NOT fuzz
+;; concurrency: the render/input loops have no deterministic scheduler seam, so interleaving generation
+;; would be flaky for ~no signal — see the dirty-exit thread-join test for that bound instead.)
+;; ---------------------------------------------------------------------------
+
+(defn- all-rects
+  "Every `::engine/rect` in a placed tree: the node's own rect plus those of every placed node descendant."
+  [placed]
+  (cons (::engine/rect placed)
+    (mapcat all-rects (filter engine/node? (::engine/children placed)))))
+
+(def ^:private main-size-gen
+  ;; a valid main-axis size spec: fixed cells, :half, a [:fraction f] in 0..1, or nil (intrinsic)
+  (gen/frequency [[4 (gen/choose 1 10)]
+                  [1 (gen/return :half)]
+                  [2 (gen/fmap (fn [n] [:fraction (/ (double n) 12)]) (gen/choose 0 12))]
+                  [2 (gen/return nil)]]))
+
+(def ^:private valid-grow-gen (gen/elements [1 2 3 1.0 2.5 1/2]))
+
+(def ^:private box-gen
+  (gen/bind gen/boolean
+    (fn [grow?]
+      (if grow?
+        (gen/fmap (fn [g] (elements/box {:grow g})) valid-grow-gen)
+        (gen/fmap (fn [s] (elements/box {:width s :height s})) main-size-gen)))))
+
+(def ^:private tree-gen
+  (gen/bind (gen/elements [:h :v])
+    (fn [axis]
+      (gen/fmap (fn [kids] (apply (if (= axis :h) elements/hbox elements/vbox) {} kids))
+        (gen/vector box-gen 0 6)))))
+
+(def ^:private viewport-gen
+  (gen/fmap (fn [[w h]] {:x 0 :y 0 :w w :h h})
+    (gen/tuple (gen/choose 0 40) (gen/choose 0 20))))
+
+(def ^:private clean-coords-prop
+  (prop/for-all [tree tree-gen rect viewport-gen]
+    (let [placed (engine/place tree rect)]
+      (and (every? (fn [r] (and (nat-int? (:x r)) (nat-int? (:y r))
+                                (nat-int? (:w r)) (nat-int? (:h r))))
+             (all-rects placed))
+           ;; painting any generated tree must not throw (a fractional/negative coord would)
+           (do (engine/render-buffer placed (max 1 (:h rect)) (max 1 (:w rect))) true)))))
+
+(specification "place — generative layout invariants (property-based)"
+  (assertions
+    "for random valid trees + viewports, every placed rect is a non-negative integer box and paint never throws"
+    (true? (:result (tc/quick-check 150 clean-coords-prop))) => true))
 
 ;; NOTE: element-generator specs (`elements/element`, `elements/focused?`, `elements/picker`)
 ;; live in `com.fulcrologic.fulcro.tui.elements-spec`.

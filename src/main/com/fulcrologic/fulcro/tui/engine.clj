@@ -361,15 +361,19 @@ with a `:grow` weight share the space left over after fixed/fraction/content-siz
 leftover is split by weight with any rounding remainder given to the last grow child. Each grow size
 is floored to a whole cell (`long`) — so non-integer `:grow` weights (e.g. `1.0`) still yield integer
 sizes and never leak fractional coordinates into the placed rects (which the paint pass uses as vector
-indices). `cross-extent` is the cross-axis track size each child will fill, used to resolve
-height-for-width wrapping text."
+indices). Only a FINITE POSITIVE `:grow` weight grows: `0`, a negative, `NaN`, `Infinity`, or a
+non-number is treated as no-grow (the child takes its fixed/intrinsic size) instead of crashing the
+`(long (quot …))` share math. `cross-extent` is the cross-axis track size each child will fill, used to
+resolve height-for-width wrapping text."
   [extent cross-extent children main-attr]
   [nat-int? nat-int? (s/coll-of ::node) keyword? => (s/coll-of nat-int?)]
   (let [info       (mapv (fn [c]
                            (let [a    (::attrs c)
+                                 g    (:grow a)
+                                 grow (when (and (number? g) (pos? g) (not (Double/isInfinite (double g)))) g)
                                  intr (main-content-size c cross-extent main-attr)]
-                             {:grow  (:grow a)
-                              :fixed (when-not (:grow a)
+                             {:grow  grow
+                              :fixed (when-not grow
                                        (resolve-size (get a main-attr) extent intr))}))
                      children)
         used       (reduce + 0 (keep :fixed info))
