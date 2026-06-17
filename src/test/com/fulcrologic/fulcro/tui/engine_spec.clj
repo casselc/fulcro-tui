@@ -281,6 +281,38 @@
                               {:x 0 :y 0 :w 10 :h 2})))
       => [5 5]))
 
+  (component "grow distribution yields whole-cell sizes (no fractional coordinates)"
+    (assertions
+      ;; A SINGLE grow child already got an integer (it takes the leftover remainder); the bug only bit
+      ;; with TWO+ grow children, where the non-last ones go through (quot (* leftover w) total-w) — and
+      ;; quot of DOUBLES returns a double, leaking floats into the placed rects.
+      "two float-weighted :grow children split the leftover into integers, not doubles"
+      (let [ws (mapv :w (child-rects (engine/place
+                                       (elements/hbox {} (elements/box {:grow 1.0}) (elements/box {:grow 1.0}))
+                                       {:x 0 :y 0 :w 11 :h 1})))]
+        [ws (mapv integer? ws)])
+      => [[5 6] [true true]]
+      "unequal float weights still partition the whole extent as integers, remainder to the last"
+      (mapv :w (child-rects (engine/place
+                              (elements/hbox {} (elements/box {:grow 1.0}) (elements/box {:grow 2.0}))
+                              {:x 0 :y 0 :w 10 :h 1})))
+      => [3 7]
+      "placed x-coords stay integers with multiple float-weighted grow children"
+      (mapv :x (child-rects (engine/place
+                              (elements/hbox {} (elements/box {:grow 1.0}) (elements/text {} "x") (elements/box {:grow 1.0}))
+                              {:x 0 :y 0 :w 30 :h 1})))
+      => [0 14 15]
+      ;; Regression: before the fix, the double coordinates made put-cell's vector assoc throw
+      ;; \"IllegalArgumentException: Key must be integer\" during paint.
+      "a tree with multiple float-weighted :grow children renders without throwing"
+      (let [row (first (engine/screen (engine/render-buffer
+                                        (engine/place
+                                          (elements/hbox {} (elements/box {:grow 1.0}) (elements/text {} "x") (elements/box {:grow 1.0}))
+                                          {:x 0 :y 0 :w 30 :h 1})
+                                        1 30)))]
+        [(count row) (str/index-of row "x")])
+      => [30 14]))
+
   (component "cross-axis alignment"
     (assertions
       "centers a narrower child within the container width"

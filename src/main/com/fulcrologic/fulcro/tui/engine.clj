@@ -358,8 +358,11 @@ child's ordinary intrinsic size on the main axis."
 (>defn- distribute-main
   "Returns a vector of resolved main-axis sizes (one per child) that partition `extent`. Children
 with a `:grow` weight share the space left over after fixed/fraction/content-sized children;
-leftover is split by weight with any rounding remainder given to the last grow child. `cross-extent`
-is the cross-axis track size each child will fill, used to resolve height-for-width wrapping text."
+leftover is split by weight with any rounding remainder given to the last grow child. Each grow size
+is floored to a whole cell (`long`) — so non-integer `:grow` weights (e.g. `1.0`) still yield integer
+sizes and never leak fractional coordinates into the placed rects (which the paint pass uses as vector
+indices). `cross-extent` is the cross-axis track size each child will fill, used to resolve
+height-for-width wrapping text."
   [extent cross-extent children main-attr]
   [nat-int? nat-int? (s/coll-of ::node) keyword? => (s/coll-of nat-int?)]
   (let [info       (mapv (fn [c]
@@ -377,7 +380,7 @@ is the cross-axis track size each child will fill, used to resolve height-for-wi
                      (loop [acc [], rem leftover, ws weights]
                        (if (seq ws)
                          (let [w  (first ws)
-                               sz (if (= 1 (count ws)) rem (quot (* leftover w) total-w))]
+                               sz (long (if (= 1 (count ws)) rem (quot (* leftover w) total-w)))]
                            (recur (conj acc sz) (- rem sz) (rest ws)))
                          acc))
                      [])]
