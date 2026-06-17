@@ -406,10 +406,17 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
 
    This is for repaint requests that originate on a SAFE thread (the input loop, a resize signal, an
    explicit `redraw!`). State-change-driven repaints go through `mark-dirty!` directly (from the
-   `:core-render!` hook) so they never render on the mutating thread even on the test path."
+   `:core-render!` hook) so they never render on the mutating thread even on the test path.
+
+   The loop is treated as present only when its runtime entry exists, its `:running?` flag is set, AND
+   its thread is still alive — so a stopped/cleared loop (after `shutdown!`) or a dead one falls back to
+   a synchronous render rather than marking dirty for a consumer that will never paint."
   [app]
   [any? => any?]
-  (if (some-> (runtime app) ::render-loop :thread)
+  (if (let [rl (::render-loop (runtime app))]
+        (and rl
+          (boolean (some-> (:running? rl) deref))
+          (boolean (some-> ^Thread (:thread rl) (.isAlive)))))
     (mark-dirty! app)
     (render! app)))
 
@@ -417,6 +424,12 @@ previous buffer so the next frame is a full repaint. A no-op when no terminal is
   "How often the render loop checks the dirty flag while idle (ms). Small enough to be imperceptible as
    input→paint latency, large enough that an idle session costs ~nothing."
   8)
+
+(def ^:private render-loop-join-ms
+  "How long `stop-render-loop!` waits for the render thread to exit before giving up (ms). Bounded so
+   shutdown cannot hang forever on a wedged render/terminal write; see `stop-render-loop!` for the
+   trade-off this bound implies."
+  1000)
 
 (>defn- run-render-loop!
   "The live render driver: the SOLE thread that paints automatically. It polls the `::dirty?` flag and,
@@ -687,17 +700,23 @@ Without the property the `perf/profile` wrapper compiles away entirely (zero ove
        handle))))
 
 (>defn- stop-render-loop!
-  "Signals the dedicated render thread to stop and BLOCKS (bounded) until it has actually exited, so
+  "Signals the dedicated render thread to stop and BLOCKS (bounded — see below) until it has exited, so
 that no in-flight or queued frame can paint while/after the terminal is being restored. Just flagging
 `running?` (as the loop's exit condition) is not enough on its own: a paint already underway races the
 `t-leave!` restore and can land the last app frame on the now-restored primary screen — a 'dirty' exit.
 Joining waits for any in-flight paint to finish and the loop to exit first. No-op (returns `app`) when
-there is no render loop (e.g. the deterministic `attach!`/`step!` path)."
+there is no render loop (e.g. the deterministic `attach!`/`step!` path).
+
+The join is bounded (`render-loop-join-ms`) so shutdown cannot hang FOREVER on a render/terminal write
+that is itself wedged. The trade-off: if a write blocks past that bound, `shutdown!` proceeds to restore
+the terminal anyway and the dirty-exit race re-opens for that (pathological) case — a stuck write would
+typically also wedge `t-leave!`, so there is no clean win available there; bounding at least guarantees
+shutdown returns."
   [app]
   [any? => any?]
   (when-let [rl (some-> (runtime app) ::render-loop)]
     (when-let [r (:running? rl)] (reset! r false))
-    (when-let [^Thread th (:thread rl)] (try (.join th 1000) (catch Throwable _ nil))))
+    (when-let [^Thread th (:thread rl)] (try (.join th render-loop-join-ms) (catch Throwable _ nil))))
   app)
 
 (>defn- shutdown!
@@ -712,6 +731,16 @@ In order:
   2. Drop the terminal's resize handler, so a stray SIGWINCH cannot repaint a closing terminal.
   3. Leave the terminal (`t-leave!` is CAS-idempotent, so a second `shutdown!` is a safe no-op). For a
      real JLine terminal this CLOSES it, forcing a thread parked in the blocking `t-read-key` to EOF.
+  4. CLEAR `::terminal` from the runtime. After step 3 the terminal is left/closed, but `render!` reads
+     it from the runtime and writes to it — so a late `request-render!` (which, with `::render-loop`
+     now cleared, falls back to a SYNCHRONOUS `render!`) would write to the closed terminal (a real
+     JLine throws 'write after leave'). Dropping `::terminal` makes that a clean no-op (`render!`
+     already no-ops when no terminal is attached); a fresh `attach!` re-establishes it.
+  5. DEREGISTER any JVM crash-restore shutdown hook (`::shutdown-hook`) and drop it. Cooperates with the
+     crash-restore feature (`install-terminal-restore-hook!`) when present, a no-op otherwise — keyword +
+     interop only, no code dependency on it. Doing it here, on the SHARED teardown that both `quit!` and
+     the input-loop `finally` run, means repeated nonblocking `mount!`+`quit!` cycles — even across fresh
+     app instances — never accumulate registered hooks.
 
 Does NOT touch the input loop's own `running?`/thread — that is the caller's concern. Returns `app`."
   [app terminal]
@@ -721,6 +750,9 @@ Does NOT touch the input loop's own `running?`/thread — that is the caller's c
   (when terminal
     (try (term/t-on-resize! terminal nil) (catch Throwable _ nil))
     (try (term/t-leave! terminal) (catch Throwable _ nil)))
+  (when-let [^Thread hook (::shutdown-hook (runtime app))]
+    (try (.removeShutdownHook (Runtime/getRuntime) hook) (catch Throwable _ nil)))
+  (swap! (runtime-atom-key app) dissoc ::terminal ::shutdown-hook)
   app)
 
 (>defn quit!
@@ -746,7 +778,11 @@ if a transport does not, the loop ends on the next keypress/EOF instead."
         app    (or (:app handle) handle-or-app)]
     (when running? (reset! running? false))
     (shutdown! app terminal)
-    (when thread (.interrupt thread))
+    ;; Interrupt the loop thread as a fallback to unblock its read — UNLESS quit! is being called FROM
+    ;; that thread (the quit-chord handler runs on the input loop). A self-interrupt sets this thread's
+    ;; interrupt flag for no benefit (t-leave! already closed the terminal, unblocking the read) and
+    ;; could trip a later interruptible call (e.g. the join in shutdown!'s own finally pass).
+    (when (and thread (not (identical? thread (Thread/currentThread)))) (.interrupt thread))
     handle-or-app))
 
 (>defn redirect-logging-to-temp-file!

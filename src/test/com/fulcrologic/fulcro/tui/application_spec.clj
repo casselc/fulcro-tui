@@ -420,6 +420,73 @@
         "the ::render-loop runtime entry was cleared"
         (render-loop-of app) => nil)))
 
+  (component "quit! is idempotent — a second quit! is a safe no-op"
+    (let [app    (new-app)
+          {:keys [terminal release left?]} (blocking-terminal 10 30)
+          handle (app/mount! app {:terminal terminal :max-fps 120})]
+      (Thread/sleep 30)
+      (app/quit! handle)
+      (deliver release nil)                                 ; let the input thread reach EOF + its finally
+      (app/quit! handle)                                    ; second call must not throw or re-break state
+      (Thread/sleep 20)
+      (assertions
+        "the render thread is gone and stays gone"
+        (.isAlive ^Thread (:render-thread handle)) => false
+        "::render-loop stays cleared"
+        (render-loop-of app) => nil
+        "the terminal stays left"
+        @left? => true)))
+
+  (component "after shutdown a late request-render! cannot write to the left/closed terminal (clears ::terminal)"
+    ;; shutdown! clears ::render-loop, so a later request-render! falls back to a SYNCHRONOUS render!.
+    ;; Unless ::terminal is also cleared, that render writes to the now-left terminal (a real JLine throws
+    ;; 'write after leave'). This fake throws on write once left, proving the post-shutdown no-op.
+    (let [release (promise)
+          left?   (atom false)
+          t       (reify term/Terminal
+                    (t-size [_] {:rows 5 :cols 10})
+                    (t-read-key [_] @release)
+                    (t-write! [_ _] (when @left? (throw (ex-info "write after leave" {}))))
+                    (t-flush! [_] nil)
+                    (t-set-cursor! [_ _ _ _] nil)
+                    (t-enter! [_] nil)
+                    (t-leave! [_] (reset! left? true) nil)
+                    (t-sync-supported? [_] false)
+                    (t-enhanced-keys? [_] false)
+                    (t-on-resize! [_ _] nil))
+          app     (new-app)
+          handle  (app/mount! app {:terminal t :max-fps 120})]
+      (app/quit! handle)                                    ; shutdown!: leaves terminal + clears ::terminal
+      (deliver release nil)                                 ; release the parked input loop
+      (assertions
+        "quit! cleared ::terminal from the runtime"
+        (app/terminal app) => nil
+        "a late request-render! is a clean no-op — it does NOT write to the left terminal, and does not throw"
+        (try (app/request-render! app) :ok (catch Throwable e [:threw (.getMessage e)])) => :ok)))
+
+  (component "shutdown! deregisters a crash-restore ::shutdown-hook if present (cooperates with terminal-restore)"
+    ;; The crash-restore feature stashes a JVM shutdown hook under ::shutdown-hook. The centralized
+    ;; shutdown! drops it on EVERY teardown (keyword + interop, no dependency on that feature) so repeated
+    ;; nonblocking mount!+quit! — even across fresh apps — never accumulate registered hooks.
+    ;; Use a blocking terminal so the input loop PARKS (no immediate EOF): only quit!'s shutdown! runs
+    ;; the teardown, so planting the hook then quit!ing is deterministic (no input-thread shutdown! racing
+    ;; the plant on a string-terminal's immediate EOF).
+    (let [app    (new-app)
+          {:keys [terminal release]} (blocking-terminal 5 10)
+          handle (app/mount! app {:terminal terminal :max-fps 120})
+          hook   (Thread. ^Runnable (fn [] nil) "fake-restore-hook")]
+      (.addShutdownHook (Runtime/getRuntime) hook)
+      (swap! (:com.fulcrologic.fulcro.application/runtime-atom app)
+        assoc :com.fulcrologic.fulcro.tui.application/shutdown-hook hook)
+      (app/quit! handle)
+      (deliver release nil)                                 ; let the parked input loop exit
+      (assertions
+        "quit!'s shutdown! cleared the ::shutdown-hook runtime entry"
+        (:com.fulcrologic.fulcro.tui.application/shutdown-hook
+          (deref (:com.fulcrologic.fulcro.application/runtime-atom app))) => nil
+        "and deregistered the hook from the JVM (removeShutdownHook => false: already removed)"
+        (.removeShutdownHook (Runtime/getRuntime) ^Thread hook) => false)))
+
   (component "a loop-level global keymap dispatches reserved chords (e.g. quit) regardless of focus"
     (let [app   (new-app)
           fired (atom false)
@@ -690,21 +757,38 @@
           "every request renders synchronously (no render loop present)"
           @calls => 5)))
 
-    (component "a render loop present defers painting to it (flags dirty, never paints on the caller)"
+    (component "a LIVE render loop present defers painting to it (flags dirty, never paints on the caller)"
       (let [app   (new-app)
             t     (term/string-terminal {:rows 10 :cols 30})
             _     (app/attach! app t)
             dirty (get @(get app runtime-key) dirty-key)
-            ;; A stand-in render-loop thread: request-render! only checks that a loop is present (via
-            ;; its :thread) to decide it must route to mark-dirty! rather than paint on the caller.
-            th    (Thread. ^Runnable (fn []))
+            ;; A stand-in render loop that is genuinely ALIVE and running: request-render! must route to
+            ;; mark-dirty! rather than paint on the caller.
+            th    (doto (Thread. ^Runnable (fn [] (try (Thread/sleep 5000) (catch Throwable _ nil))))
+                    (.setDaemon true) (.start))
             calls (atom 0)]
         (swap! (get app runtime-key) assoc render-loop-key {:thread th :running? (atom true)})
         (reset! dirty false)
         (with-redefs [app/render! (fn [a] (swap! calls inc) a)]
           (app/request-render! app))
+        (.interrupt th)
         (assertions
           "does NOT render on the calling thread"
           @calls => 0
           "flags the app dirty so the render loop repaints"
-          @dirty => true)))))
+          @dirty => true)))
+
+    (component "a STOPPED/dead render-loop entry renders synchronously (does not enqueue onto a dead loop)"
+      (let [app   (new-app)
+            t     (term/string-terminal {:rows 10 :cols 30})
+            _     (app/attach! app t)
+            ;; The entry lingers with :running? true, but the thread is NOT alive (never started) — models
+            ;; a loop that has exited while its runtime entry has not yet been cleared.
+            th    (Thread. ^Runnable (fn []))
+            calls (atom 0)]
+        (swap! (get app runtime-key) assoc render-loop-key {:thread th :running? (atom true)})
+        (with-redefs [app/render! (fn [a] (swap! calls inc) a)]
+          (app/request-render! app))
+        (assertions
+          "renders synchronously because the loop thread is not alive"
+          @calls => 1)))))
