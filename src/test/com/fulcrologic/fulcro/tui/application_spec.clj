@@ -111,6 +111,86 @@
         "the hardware cursor is shown at input :a's caret origin (0,0)"
         (term/cursor t) => {:x 0 :y 0 :visible? true}))))
 
+(specification "terminal restore on crash — JVM shutdown hook"
+  (let [hook-of (fn [app] (:com.fulcrologic.fulcro.tui.application/shutdown-hook
+                            (deref (:com.fulcrologic.fulcro.application/runtime-atom app))))]
+    (component "mount! installs a shutdown hook that leaves the terminal if the process dies before teardown"
+      (let [app    (new-app)
+            t      (term/string-terminal {:rows 10 :cols 30})
+            handle (app/mount! app {:terminal t})
+            hook   (hook-of app)]
+        (assertions
+          "mount! registered a JVM shutdown-hook Thread (stashed under ::shutdown-hook)"
+          (instance? Thread hook) => true)
+        ;; Isolate the hook's effect from the normal teardown: pretend the terminal was NOT yet left,
+        ;; then run the hook directly (the JVM runs it on an abnormal exit) and confirm it leaves it.
+        (swap! (.-state t) assoc :left? false)
+        (.run ^Thread hook)
+        (assertions
+          "running the hook leaves the terminal (restores alt-screen / auto-wrap / cursor / raw mode)"
+          (:left? @(.-state t)) => true)
+        (app/quit! handle)))
+
+    (component "mount! restores the terminal (and drops the hook) if attach! throws before the loop starts"
+      ;; attach! enters the alt-screen (t-enter!) then does the first paint; if either throws, the
+      ;; terminal must NOT be stranded in raw/alt-screen mode. The hook is installed BEFORE attach!, and
+      ;; the catch leaves the terminal immediately + deregisters the hook, then rethrows.
+      (let [app   (new-app)
+            left? (atom false)
+            t     (reify term/Terminal
+                    (t-size [_] {:rows 10 :cols 30})
+                    (t-read-key [_] nil)
+                    (t-write! [_ _] nil)
+                    (t-flush! [_] nil)
+                    (t-set-cursor! [_ _ _ _] nil)
+                    (t-enter! [_] (throw (ex-info "enter boom" {})))
+                    (t-leave! [_] (reset! left? true))
+                    (t-sync-supported? [_] false)
+                    (t-enhanced-keys? [_] false)
+                    (t-on-resize! [_ _] nil))]
+        (assertions
+          "mount! propagates the attach! failure to the caller"
+          (try (app/mount! app {:terminal t}) ::no-throw (catch Throwable _ ::threw)) => ::threw
+          "the terminal was left/restored despite the failure (not stranded in alt-screen)"
+          @left? => true
+          "the crash hook was deregistered after the failed mount (not leaked)"
+          (hook-of app) => nil)))
+
+    (component "re-mounting the same app REPLACES the hook rather than accumulating"
+      ;; The no-accumulation invariant holds regardless of WHEN the previous hook is deregistered: with
+      ;; this feature alone, install-terminal-restore-hook! drops the prior hook on the next mount!; with
+      ;; the centralized shutdown! (fix/dirty-terminal-on-exit), quit! already dropped it. Either way,
+      ;; after a mount!→quit!→mount! cycle the first hook is gone and the second is a distinct live hook —
+      ;; so this test passes both on this branch in isolation and on the integration. (We deliberately do
+      ;; NOT assert whether the hook survives the bare quit!, since that legitimately differs by config.)
+      (let [app   (new-app)
+            t1    (term/string-terminal {:rows 10 :cols 30})
+            h1    (app/mount! app {:terminal t1})
+            hook1 (hook-of app)
+            _     (app/quit! h1)
+            t2    (term/string-terminal {:rows 10 :cols 30})
+            h2    (app/mount! app {:terminal t2})
+            hook2 (hook-of app)]
+        (app/quit! h2)
+        (assertions
+          "the first mount! registered a hook Thread"
+          (instance? Thread hook1) => true
+          "re-mounting installs a DIFFERENT live hook Thread"
+          (instance? Thread hook2) => true
+          (identical? hook1 hook2) => false
+          "the previous hook is deregistered from the JVM (no accumulation; removeShutdownHook => false)"
+          (.removeShutdownHook (Runtime/getRuntime) ^Thread hook1) => false)))
+
+    (component "run-blocking! deregisters the hook after a clean session (no hook accumulation)"
+      (let [app (new-app)
+            t   (term/string-terminal {:rows 10 :cols 30 :keys [{:key "a" :char "a"}]})]
+        (app/run-blocking! app {:terminal t :max-fps 120})
+        (assertions
+          "after a clean run-blocking! session the ::shutdown-hook entry is cleared"
+          (hook-of app) => nil
+          "the terminal was left normally"
+          (:left? @(.-state t)) => true)))))
+
 (specification {:covers {`app/step! "6b509b,7a63d8"}} "step! — focus, typing, and activation"
   (component "Tab moves focus and follows the cursor to the newly focused input"
     (let [app (new-app)

@@ -49,6 +49,7 @@
 (>def ::render-throttle-ms int?)
 (>def ::dirty? (? any?))                                    ; atom<boolean>: a repaint is pending (see `mark-dirty!`)
 (>def ::render-loop (? any?))                               ; the render-driver handle {:thread :running?} (live path)
+(>def ::shutdown-hook (? any?))                             ; JVM shutdown-hook Thread: restores the terminal on crash/kill
 (>def ::min-size (s/keys :req-un [::min-width ::min-height]))
 (>def ::min-width int?)
 (>def ::min-height int?)
@@ -533,7 +534,14 @@ initial focus. Returns `nil` if the app has no state/root yet."
   "Attaches `terminal` to `app` and performs the initial paint. Stashes the terminal in the runtime
 atom, enters the terminal (`term/t-enter!`), registers a resize handler that repaints on a terminal
 size change (`t-on-resize!` → `render!`), sets initial focus to the first node in the current tree's
-`focus-order` when `::engine/focus` is unset, and renders once. Returns `app`. Starts no loop."
+`focus-order` when `::engine/focus` is unset, and renders once. Returns `app`. Starts no loop.
+
+This is the LOW-LEVEL, deterministic entry (used by `step!`, tests, and as the building block inside
+`mount!`). It deliberately does NOT install the JVM crash-restore shutdown hook: that is owned by
+`mount!`/`run-blocking!`, which drive real signal-handled sessions and tear it down on exit. Installing
+it here would register a JVM hook on every headless `attach!`/`step!` test. A caller building a custom
+loop directly on `attach!`+`step!` (rather than `mount!`) is responsible for its own terminal restore on
+abnormal exit (or should use `mount!`/`run-blocking!`, which handle it)."
   [app terminal]
   [any? any? => any?]
   (swap! (runtime-atom-key app) assoc ::terminal terminal)
@@ -553,6 +561,42 @@ size change (`t-on-resize!` → `render!`), sets initial focus to the first node
       (when-let [first-id (:id (first order))]
         (engine/focus! app first-id))))
   (render! app)
+  app)
+
+(declare remove-terminal-restore-hook!)
+
+(>defn- install-terminal-restore-hook!
+  "Registers a JVM shutdown hook that idempotently leaves `terminal` — restoring the alternate screen,
+auto-wrap, cursor visibility, and raw mode — if the process dies (a crash, an uncaught throw, or a
+SIGTERM/Ctrl-C kill) BEFORE the normal teardown runs. `t-leave!` is CAS-idempotent, so on a clean exit
+(where the input-loop `finally`/`quit!` already left the terminal) the hook is a harmless no-op. The hook
+Thread is stashed under `::shutdown-hook` so `run-blocking!` can deregister it after a clean session.
+
+DEREGISTERS any hook this app already has FIRST, so a host that `mount!`s the same app repeatedly (e.g.
+`mount!`+`quit!` in a loop, which does not itself remove the hook) replaces rather than accumulates
+registered hooks — only ever one is live per app. Best-effort: a platform without shutdown hooks (or a
+restrictive SecurityManager) simply skips it."
+  [app terminal]
+  [any? any? => any?]
+  (try
+    (remove-terminal-restore-hook! app)
+    (let [hook (Thread. ^Runnable (fn [] (try (term/t-leave! terminal) (catch Throwable _ nil)))
+                 "fulcro-tui-terminal-restore")]
+      (.addShutdownHook (Runtime/getRuntime) hook)
+      (swap! (runtime-atom-key app) assoc ::shutdown-hook hook))
+    (catch Throwable _ nil))
+  app)
+
+(>defn- remove-terminal-restore-hook!
+  "Deregisters the shutdown hook installed by `install-terminal-restore-hook!` after a CLEAN session, so a
+long-lived host that mounts/unmounts repeatedly does not accumulate hooks. No-op if there is none, it was
+already removed, or the JVM is already shutting down (`removeShutdownHook` throws then — caught). Returns
+`app`."
+  [app]
+  [any? => any?]
+  (when-let [hook (::shutdown-hook (runtime app))]
+    (try (.removeShutdownHook (Runtime/getRuntime) hook) (catch Throwable _ nil))
+    (swap! (runtime-atom-key app) dissoc ::shutdown-hook))
   app)
 
 (>defn mount!
@@ -582,7 +626,18 @@ size change (`t-on-resize!` → `render!`), sets initial focus to the first node
 Returns a handle map `{:app :terminal :thread :running? :error}`. `:running?` is an atom that, when
 set false, stops the loop; `:error` is an atom holding any uncaught loop exception (else `nil`).
 The loop reads keys with `term/t-read-key`; a `nil` (EOF) read or `:running?` becoming false
-terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
+terminates it; `term/t-leave!` is always called on exit (in a `finally`). A JVM shutdown hook is also
+installed so a crash / uncaught throw / SIGTERM before that teardown still restores the terminal;
+`run-blocking!` deregisters it after a clean session.
+
+Hook lifecycle caveat (this feature in isolation): the input-loop `finally`/`quit!` here only call
+`t-leave!`, so a bare `mount!`+`quit!` (no `run-blocking!`) leaves ITS hook registered until JVM exit —
+a harmless no-op (the terminal was already left), and `mount!`ing the SAME app again replaces rather
+than accumulates it (see `install-terminal-restore-hook!`). But a host that runs many bare
+`mount!`+`quit!` sessions on FRESH app instances would accumulate one registered (no-op) hook per app
+until JVM exit. The centralized teardown in `fix/dirty-terminal-on-exit` closes this: its `shutdown!`
+(run by both `quit!` and the `finally`) deregisters the hook on EVERY teardown, so accumulation cannot
+happen once these land together."
   ([app]
    [any? => ::handle]
    (mount! app {}))
@@ -598,7 +653,19 @@ terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
      ;; running, `request-render!`/`mark-dirty!` route ALL further paints onto it (never onto the input
      ;; loop, a transaction, or the statechart event-loop thread).
      (swap! (runtime-atom-key app) assoc ::render-throttle-ms throttle-ms)
-     (attach! app terminal)
+     ;; Restore the terminal even if the process DIES (crash / uncaught throw / SIGTERM) before the
+     ;; normal teardown runs. `run-blocking!` deregisters it after a clean session. Installed BEFORE
+     ;; `attach!`: `attach!` enters the alternate screen (`t-enter!`) and does the first paint, so a
+     ;; throw mid-`attach!` would otherwise strand the terminal in raw/alt-screen mode with no hook yet.
+     (install-terminal-restore-hook! app terminal)
+     (try
+       (attach! app terminal)
+       (catch Throwable t
+         ;; Initial enter/render failed: restore the terminal NOW (don't wait for the JVM hook) and drop
+         ;; the hook, then rethrow so the caller sees the failure with the terminal already clean.
+         (try (term/t-leave! terminal) (catch Throwable _ nil))
+         (remove-terminal-restore-hook! app)
+         (throw t)))
      (let [render-running? (atom true)
            render-thread   (Thread. ^Runnable (fn [] (try (run-render-loop! app render-running? throttle-ms)
                                                           (catch Throwable _ nil)))
@@ -675,6 +742,9 @@ Without the property the `perf/profile` wrapper compiles away entirely (zero ove
      (let [opts (merge {:max-fps 30} opts)
            {:keys [^Thread thread] :as handle} (mount! app opts)]
        (.join thread)
+       ;; Clean session ended (the input-loop finally already left the terminal): drop the crash-restore
+       ;; hook so a host running many sessions in one JVM does not accumulate shutdown hooks.
+       (remove-terminal-restore-hook! app)
        handle))))
 
 (>defn quit!
