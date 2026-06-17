@@ -48,6 +48,34 @@
 (defn- state [app]
   (deref (:com.fulcrologic.fulcro.application/state-atom app)))
 
+(defn- render-loop-of [app]
+  (:com.fulcrologic.fulcro.tui.application/render-loop
+    (deref (:com.fulcrologic.fulcro.application/runtime-atom app))))
+
+(defn- blocking-terminal
+  "A fake `Terminal` whose `t-read-key` BLOCKS until `:release` is delivered (then returns nil = EOF), so
+   the input loop stays parked and the dedicated render loop keeps running — letting a test exercise
+   off-input-thread repaints and live-loop teardown WITHOUT the input loop EOF-ing first (the render loop
+   must NOT outlive the terminal, so we can no longer lean on it surviving an immediate EOF). Returns
+   `{:terminal t :release p :left? a}`; `t-leave!` sets `:left?`. `t-size` is fixed at `rows`x`cols`."
+  ([] (blocking-terminal 10 30))
+  ([rows cols]
+   (let [release (promise)
+         left?   (atom false)]
+     {:terminal (reify term/Terminal
+                  (t-size [_] {:rows rows :cols cols})
+                  (t-read-key [_] @release)
+                  (t-write! [_ _] nil)
+                  (t-flush! [_] nil)
+                  (t-set-cursor! [_ _ _ _] nil)
+                  (t-enter! [_] nil)
+                  (t-leave! [_] (reset! left? true) nil)
+                  (t-sync-supported? [_] false)
+                  (t-enhanced-keys? [_] false)
+                  (t-on-resize! [_ _] nil))
+      :release release
+      :left?   left?})))
+
 ;; A root with a fixed-height viewport of many focusable items, for scrolling/follow-focus tests.
 (comp/defsc VPRoot [this _props]
   {:query         [:vp/x]
@@ -356,20 +384,41 @@
         "quit! leaves the terminal"
         (:left? @(.-state t)) => true)))
 
-  (component "quit! JOINS the render thread before leaving (so no frame paints onto the restored screen)"
+  (component "quit! JOINS+CLEARS the render loop before leaving (so no frame paints onto the restored screen)"
+    ;; Blocking terminal so the input loop is parked and the render loop is genuinely LIVE when quit! runs
+    ;; (otherwise the input-loop finally would already have torn it down on EOF, making the join moot).
     (let [app    (new-app)
-          t      (term/string-terminal {:rows 10 :cols 30})
-          handle (app/mount! app {:terminal t :max-fps 120})]
+          {:keys [terminal release left?]} (blocking-terminal 10 30)
+          handle (app/mount! app {:terminal terminal :max-fps 120})]
       (Thread/sleep 30)                                     ; let the dedicated render thread spin up
       (app/quit! handle)
+      (deliver release nil)                                 ; unblock the parked read so the input thread can end
       (assertions
         ;; The bug: quit! only FLAGGED the render loop, then immediately left the terminal — so an
-        ;; in-flight paint could land on the just-restored screen. The fix joins the thread first, so
+        ;; in-flight paint could land on the just-restored screen. shutdown! joins the thread first, so
         ;; by the time quit! returns the render thread is provably gone.
         "the dedicated render thread has exited by the time quit! returns (joined, not just flagged)"
         (.isAlive ^Thread (:render-thread handle)) => false
+        ;; D: the runtime ::render-loop entry is removed, so a later request-render! does not enqueue onto
+        ;; a dead thread (it falls back to a synchronous render, like a freshly-attached app).
+        "the ::render-loop runtime entry is cleared"
+        (render-loop-of app) => nil
         "quit! still flips running? false and leaves the terminal"
-        [(deref (:running? handle)) (:left? @(.-state t))] => [false true])))
+        [(deref (:running? handle)) @left?] => [false true])))
+
+  (component "EOF exit tears down fully too (not only quit!): render thread stopped, ::render-loop cleared, terminal left"
+    ;; Regression for the dirty-terminal fix's blind spot: run-blocking! reaching EOF used to leave the
+    ;; terminal but leave the render thread ALIVE (it would then paint a closed terminal / leak a daemon).
+    (let [app    (new-app)
+          t      (term/string-terminal {:rows 10 :cols 30 :keys [{:key "a" :char "a"}]})
+          handle (app/run-blocking! app {:terminal t :max-fps 120})]
+      (assertions
+        "the terminal was left"
+        (:left? @(.-state t)) => true
+        "the render thread was stopped — NOT leaked alive after EOF"
+        (.isAlive ^Thread (:render-thread handle)) => false
+        "the ::render-loop runtime entry was cleared"
+        (render-loop-of app) => nil)))
 
   (component "a loop-level global keymap dispatches reserved chords (e.g. quit) regardless of focus"
     (let [app   (new-app)
@@ -389,13 +438,13 @@
 
 (specification {:covers {`app/run-render-loop! "971aca,4498f1"}}
   "live render loop — repaints a state change made off the input thread (decoupled rendering)"
-  (let [app    (new-app)
-        ;; No scripted keys: the input loop reads nil and exits immediately, leaving ONLY the
-        ;; dedicated render loop running — exactly the thread we want to prove paints.
-        t      (term/string-terminal {:rows 10 :cols 30})
-        handle (app/mount! app {:terminal t :max-fps 120})]
-    ;; A state change NOT driven by a keystroke (stands in for a statechart/async update). It only
-    ;; flags dirty on THIS thread; the render loop must pick it up and repaint.
+  ;; A BLOCKING terminal parks the input loop in t-read-key, so the render loop stays alive because the
+  ;; SESSION is live — we no longer rely on the render loop surviving an immediate input EOF (it must not).
+  (let [app           (new-app)
+        {:keys [terminal release left?]} (blocking-terminal 10 30)
+        handle        (app/mount! app {:terminal terminal :max-fps 120})]
+    ;; A state change NOT driven by a keystroke (stands in for a statechart/async update). It only flags
+    ;; dirty on THIS thread; the render loop must pick it up and repaint.
     (comp/transact! app [(set-a {:v "ZZ"})])
     (let [painted? (loop [n 0]
                      (cond
@@ -404,10 +453,14 @@
                        (str/starts-with? (or (nth (app/screen-of app) 0 nil) "") "ZZ") true
                        (>= n 200) false
                        :else (do (Thread/sleep 10) (recur (inc n)))))]
-      (app/quit! handle)
+      ;; End the session by EOF-ing the read; the input-loop finally then runs the FULL teardown.
+      (deliver release nil)
+      (Thread/sleep 60)
       (assertions
         "the dedicated render loop repaints an off-input-thread state change without an explicit render!"
-        painted? => true))))
+        painted? => true
+        "EOF then tears down fully — the terminal is left AND the render thread is stopped, not leaked"
+        [@left? (.isAlive ^Thread (:render-thread handle))] => [true false]))))
 
 ;; ---------------------------------------------------------------------------
 ;; Overlay / picker: a root with a launch button and a state-gated picker.

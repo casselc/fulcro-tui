@@ -522,6 +522,10 @@ The placed tree from the previous frame is used to locate the enclosing viewport
 ;; Attach / mount / run / quit
 ;; ============================================================================
 
+;; `mount!`'s input-loop `finally` tears down via `shutdown!`, which is defined below (next to `quit!`,
+;; its other caller). Forward-declared so the `finally` can reference it.
+(declare shutdown!)
+
 (>defn- initial-node-tree
   "Returns the current pure TUI node tree for `app` (root class + `db->tree`), for computing the
 initial focus. Returns `nil` if the app has no state/root yet."
@@ -647,7 +651,10 @@ terminates it; `term/t-leave!` is always called on exit (in a `finally`)."
                          (reset! error t)
                          (when on-error (try (on-error app t) (catch Throwable _ nil))))
                        (finally
-                         (term/t-leave! terminal))))
+                         ;; FULL teardown on ANY input-loop exit (EOF, error, or running?→false), not just
+                         ;; t-leave!: stop+join+clear the render loop too, so it can't outlive the terminal
+                         ;; (paint a closed terminal / leak the daemon). Same helper `quit!` uses.
+                         (shutdown! app terminal))))
            thread  (Thread. ^Runnable loop-fn "fulcro-tui-input-loop")
            handle  {:app app :terminal terminal :thread thread :running? running? :error error
                     :render-thread (some-> (runtime app) ::render-loop :thread)}]
@@ -693,21 +700,39 @@ there is no render loop (e.g. the deterministic `attach!`/`step!` path)."
     (when-let [^Thread th (:thread rl)] (try (.join th 1000) (catch Throwable _ nil))))
   app)
 
+(>defn- shutdown!
+  "Idempotent teardown of `app`'s live driver, safe from ANY exit path — `quit!` and the input loop's
+`finally` (EOF, error, or `running?`→false) BOTH call it, so the render loop never outlives the terminal.
+In order:
+
+  1. Stop+join the render loop and CLEAR its runtime entry (`stop-render-loop!` + dissoc `::render-loop`):
+     no in-flight or queued frame can paint during/after the restore, AND a later `request-render!` no
+     longer enqueues onto a dead thread — with no loop installed it falls back to a synchronous render
+     (like a freshly-`attach!`ed app), keeping the app reusable/re-attachable.
+  2. Drop the terminal's resize handler, so a stray SIGWINCH cannot repaint a closing terminal.
+  3. Leave the terminal (`t-leave!` is CAS-idempotent, so a second `shutdown!` is a safe no-op). For a
+     real JLine terminal this CLOSES it, forcing a thread parked in the blocking `t-read-key` to EOF.
+
+Does NOT touch the input loop's own `running?`/thread — that is the caller's concern. Returns `app`."
+  [app terminal]
+  [any? any? => any?]
+  (stop-render-loop! app)
+  (swap! (runtime-atom-key app) dissoc ::render-loop)
+  (when terminal
+    (try (term/t-on-resize! terminal nil) (catch Throwable _ nil))
+    (try (term/t-leave! terminal) (catch Throwable _ nil)))
+  app)
+
 (>defn quit!
   "Stops the input loop for a `mount!`/`run-blocking!` `handle` (or, given an `app`, looks up its
 handle/terminal). Returns `handle-or-app`. Steps, in order:
 
 1. Sets `:running?` false (so the loop won't process the next key).
-2. Stops the dedicated render loop AND joins its thread (`stop-render-loop!`), so no in-flight or
-   queued frame paints during/after the terminal restore (which would leave the last app frame on
-   screen — a 'dirty' exit).
-3. Unregisters the terminal's resize handler (`t-on-resize!` with `nil`) — otherwise a stray
-   SIGWINCH delivered after the terminal is closed would invoke `render!` against a closed
-   terminal (C1).
-4. Leaves the terminal (`t-leave!`). For a real JLine terminal this CLOSES the terminal, which
-   forces a thread parked in the blocking `t-read-key` to return EOF — this (not the interrupt)
-   is what actually unblocks and ends a programmatically-quit loop (C3).
-5. Best-effort `.interrupt` of the loop thread as a fallback.
+2. `shutdown!`s the driver: stops+joins+clears the render loop, drops the resize handler, and leaves
+   the terminal — the SAME teardown the input loop's `finally` runs, so an in-flight frame cannot paint
+   onto the restored screen (a 'dirty' exit) and the render thread is never leaked. Leaving the terminal
+   also CLOSES a real JLine terminal, forcing a thread parked in `t-read-key` to EOF (C3).
+3. Best-effort `.interrupt` of the loop thread as a fallback.
 
 Residual limitation: unblocking the blocked read depends on JLine closing the input on `.close`;
 if a transport does not, the loop ends on the next keypress/EOF instead."
@@ -720,14 +745,7 @@ if a transport does not, the loop ends on the next keypress/EOF instead."
         {:keys [^Thread thread running? terminal]} (or handle {:terminal (terminal handle-or-app)})
         app    (or (:app handle) handle-or-app)]
     (when running? (reset! running? false))
-    ;; Stop the dedicated render loop AND wait for it to actually exit BEFORE leaving the terminal, so
-    ;; neither an in-flight frame nor a queued repaint can paint onto the screen we are about to restore.
-    (stop-render-loop! app)
-    (when terminal
-      ;; C1: drop the resize handler BEFORE closing, so a concurrent SIGWINCH can't paint a
-      ;; closed terminal. Then C3: t-leave! closes it, forcing the blocked read to EOF.
-      (try (term/t-on-resize! terminal nil) (catch Throwable _ nil))
-      (try (term/t-leave! terminal) (catch Throwable _ nil)))
+    (shutdown! app terminal)
     (when thread (.interrupt thread))
     handle-or-app))
 
